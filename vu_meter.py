@@ -45,6 +45,7 @@ class VUMeter:
         self.history_seconds = 5
         self.history_size = int(self.history_seconds / update_interval)
         self.db_history = [[] for _ in range(channels)]
+        self.clip_history = [[] for _ in range(channels)]  # Track clipping events
         
     def start_recording(self):
         """Start the pw-record subprocess"""
@@ -93,18 +94,29 @@ class VUMeter:
         # Clamp to reasonable range
         return max(self.min_db, min(self.max_db, db))
     
-    def update_history(self, channel, db_value):
-        """Update history for a channel and return max of last 5 seconds and on/off status"""
+    def detect_clipping(self, audio_channel):
+        """Detect if any samples exceed 99.9% of full scale"""
+        clip_threshold = 0.999 * self.max_value
+        return np.any(np.abs(audio_channel) >= clip_threshold)
+    
+    def update_history(self, channel, db_value, is_clipping):
+        """Update history for a channel and return max of last 5 seconds, on/off status, and clipping status"""
         self.db_history[channel].append(db_value)
+        self.clip_history[channel].append(is_clipping)
+        
         # Keep only last N values (5 seconds worth)
         if len(self.db_history[channel]) > self.history_size:
             self.db_history[channel].pop(0)
+        if len(self.clip_history[channel]) > self.history_size:
+            self.clip_history[channel].pop(0)
         
         max_db = max(self.db_history[channel]) if self.db_history[channel] else self.min_db
         # Source is "on" if any value in last 5 seconds exceeded threshold
         is_on = any(db > self.off_threshold for db in self.db_history[channel])
+        # Clipping detected if any clip in last 5 seconds
+        has_clipped = any(self.clip_history[channel])
         
-        return max_db, is_on
+        return max_db, is_on, has_clipped
         
     def draw_vu_meter(self, stdscr):
         """Main curses loop to draw the VU meter"""
@@ -152,12 +164,15 @@ class VUMeter:
                 db_levels = []
                 max_db_levels = []
                 is_on_status = []
+                clip_status = []
                 for ch in range(self.channels):
                     db = self.calculate_db(audio[:, ch])
-                    max_db, is_on = self.update_history(ch, db)
+                    is_clipping = self.detect_clipping(audio[:, ch])
+                    max_db, is_on, has_clipped = self.update_history(ch, db, is_clipping)
                     db_levels.append(db)
                     max_db_levels.append(max_db)
                     is_on_status.append(is_on)
+                    clip_status.append(has_clipped)
                     
                 # Draw header
                 header = f"VU Meter - {self.target} | Press 'q' or ESC to quit"
@@ -169,10 +184,10 @@ class VUMeter:
                 # Draw VU meters for each channel
                 start_row = 2
                 left_label_width = 10  # Width for " -XX.XdB "
-                right_label_width = 12  # Width for " Max: -XX.X"
+                right_label_width = 20  # Width for " Peak: -XX.X CLIP"
                 bar_width = width - left_label_width - right_label_width - 1
                 
-                for ch, (db, max_db, is_on) in enumerate(zip(db_levels, max_db_levels, is_on_status)):
+                for ch, (db, max_db, is_on, has_clipped) in enumerate(zip(db_levels, max_db_levels, is_on_status, clip_status)):
                     row = start_row + ch * 2
                     if row >= height - 1:
                         break
@@ -187,7 +202,10 @@ class VUMeter:
                     
                     # Create labels
                     left_label = f" {db:5.1f}dB "
-                    right_label = f" Peak:{max_db:5.1f}"
+                    if has_clipped:
+                        right_label = f" Peak:{max_db:5.1f} CLIP"
+                    else:
+                        right_label = f" Peak:{max_db:5.1f}"
                     
                     try:
                         # Draw left label (current dB)
