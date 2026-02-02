@@ -117,6 +117,13 @@ class VUMeter:
         has_clipped = any(self.clip_history[channel])
         
         return max_db, is_on, has_clipped
+    
+    def is_any_channel_on(self):
+        """Check if any channel is currently on"""
+        for ch_history in self.db_history:
+            if any(db > self.off_threshold for db in ch_history):
+                return True
+        return False
         
     def draw_vu_meter(self, stdscr):
         """Main curses loop to draw the VU meter"""
