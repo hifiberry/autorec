@@ -9,16 +9,18 @@ import queue
 import wave
 import os
 import sys
+import time
 import numpy as np
 import curses
 import argparse
 from vu_meter import VUMeter
+from pipewire_utils import get_available_targets, list_targets, validate_and_select_target
 
 
 class AudioRecorder:
     """Records audio to WAV files with automatic start/stop based on signal detection"""
     
-    def __init__(self, base_filename, rate, channels, format, bytes_per_sample):
+    def __init__(self, base_filename, rate, channels, format, bytes_per_sample, min_length=600):
         """
         Initialize the audio recorder
         
@@ -28,12 +30,14 @@ class AudioRecorder:
             channels: Number of audio channels
             format: Sample format (s16, s32, etc.)
             bytes_per_sample: Bytes per sample
+            min_length: Minimum recording length in seconds (default: 600)
         """
         self.base_filename = base_filename
         self.rate = rate
         self.channels = channels
         self.format = format
         self.bytes_per_sample = bytes_per_sample
+        self.min_length = min_length
         
         # Determine WAV parameters
         if format in ["s16", "s16le"]:
@@ -49,6 +53,20 @@ class AudioRecorder:
         self.recording = False
         self.current_file = None
         self.wav_file = None
+        self.recording_start_time = None
+        self.clipping_detected = False  # Track if clipping occurred during current recording
+        
+        # Initialize file counter by checking existing files
+        base_no_ext = base_filename
+        if base_no_ext.endswith('.wav'):
+            base_no_ext = base_no_ext[:-4]
+        
+        # Find the highest existing file number (check both normal and clipped)
+        n = 1
+        while os.path.exists(f"{base_no_ext}.{n}.wav") or os.path.exists(f"{base_no_ext}.{n}.clipped.wav"):
+            n += 1
+        self.next_file_number = n
+        
         self.recording_thread = None
         self.queue = queue.Queue()
         self.stop_thread = threading.Event()
@@ -59,23 +77,14 @@ class AudioRecorder:
     
     def _get_next_filename(self):
         """Find the next available filename with auto-incrementing number"""
-        base = self.base_filename
-        if not base.endswith('.wav'):
-            base = base + '.wav'
+        # Remove .wav extension if present
+        base_no_ext = self.base_filename
+        if base_no_ext.endswith('.wav'):
+            base_no_ext = base_no_ext[:-4]
         
-        # Extract base without extension for numbering
-        if base.endswith('.wav'):
-            base_no_ext = base[:-4]
-        else:
-            base_no_ext = base
-        
-        # Find the smallest unused number
-        n = 1
-        while True:
-            filename = f"{base_no_ext}.{n}.wav"
-            if not os.path.exists(filename):
-                return filename
-            n += 1
+        # Use current file number
+        filename = f"{base_no_ext}.{self.next_file_number}.wav"
+        return filename
     
     def _recording_worker(self):
         """Worker thread that handles writing audio data to files"""
@@ -96,6 +105,8 @@ class AudioRecorder:
                         self.wav_file.setsampwidth(self.sampwidth)
                         self.wav_file.setframerate(self.rate)
                         self.recording = True
+                        self.recording_start_time = time.time()
+                        self.clipping_detected = False  # Reset clipping flag
                         print(f"\nStarted recording to {self.current_file}", flush=True)
                 
                 elif command == "write":
@@ -103,13 +114,45 @@ class AudioRecorder:
                         # Write audio data
                         self.wav_file.writeframes(data.tobytes())
                 
+                elif command == "clipping":
+                    # Mark that clipping was detected
+                    self.clipping_detected = True
+                
                 elif command == "stop":
                     if self.recording and self.wav_file:
                         self.wav_file.close()
                         self.recording = False
-                        print(f"\nStopped recording to {self.current_file}", flush=True)
+                        
+                        # Check recording duration
+                        duration = time.time() - self.recording_start_time if self.recording_start_time else 0
+                        
+                        if duration < self.min_length:
+                            print(f"\nRecording too short ({duration:.1f}s < {self.min_length}s), deleting {self.current_file}", flush=True)
+                            try:
+                                os.remove(self.current_file)
+                            except Exception as e:
+                                print(f"\nError deleting file: {e}", flush=True)
+                            # Don't increment counter, reuse this number
+                        else:
+                            # Rename file if clipping was detected
+                            final_file = self.current_file
+                            if self.clipping_detected:
+                                # Insert .clipped before .wav extension
+                                clipped_file = self.current_file.replace('.wav', '.clipped.wav')
+                                try:
+                                    os.rename(self.current_file, clipped_file)
+                                    final_file = clipped_file
+                                    print(f"\nStopped recording to {final_file} (duration: {duration:.1f}s) [CLIPPED]", flush=True)
+                                except Exception as e:
+                                    print(f"\nStopped recording to {final_file} (duration: {duration:.1f}s) - Error renaming: {e}", flush=True)
+                            else:
+                                print(f"\nStopped recording to {final_file} (duration: {duration:.1f}s)", flush=True)
+                            # Only increment counter when file is kept
+                            self.next_file_number += 1
+                        
                         self.current_file = None
                         self.wav_file = None
+                        self.recording_start_time = None
                 
                 self.queue.task_done()
                 
@@ -118,18 +161,21 @@ class AudioRecorder:
             except Exception as e:
                 print(f"\nRecording error: {e}", flush=True)
     
-    def write_audio(self, audio_data, is_on):
+    def write_audio(self, audio_data, is_on, has_clipped=False):
         """
         Write audio data if recording
         
         Args:
             audio_data: Audio data as numpy array
             is_on: Whether signal is currently on
+            has_clipped: Whether clipping was detected in this chunk
         """
         if is_on:
             if not self.recording:
                 self.queue.put(("start", None))
             self.queue.put(("write", audio_data))
+            if has_clipped:
+                self.queue.put(("clipping", None))
         elif self.recording:
             self.queue.put(("stop", None))
     
@@ -194,31 +240,37 @@ class RecordingVUMeter(VUMeter):
                 
                 # Process audio and get status
                 db_levels = []
+                peak_db_levels = []
                 max_db_levels = []
+                max_peak_db_levels = []
                 is_on_status = []
                 clip_status = []
                 
                 for ch in range(self.channels):
                     db = self.calculate_db(audio[:, ch])
+                    peak_db = self.calculate_peak_db(audio[:, ch])
                     is_clipping = self.detect_clipping(audio[:, ch])
-                    max_db, is_on, has_clipped = self.update_history(ch, db, is_clipping)
+                    max_db, max_peak_db, is_on, has_clipped = self.update_history(ch, db, peak_db, is_clipping)
                     db_levels.append(db)
+                    peak_db_levels.append(peak_db)
                     max_db_levels.append(max_db)
+                    max_peak_db_levels.append(max_peak_db)
                     is_on_status.append(is_on)
                     clip_status.append(has_clipped)
                 
                 # Handle recording - active if ANY channel is on
                 any_channel_on = any(is_on_status)
-                self.recorder.write_audio(audio, any_channel_on)
+                any_clipping = any(clip_status)
+                self.recorder.write_audio(audio, any_channel_on, any_clipping)
                 
                 # Draw the VU meter
-                self._draw_display(stdscr, db_levels, max_db_levels, is_on_status, clip_status)
+                self._draw_display(stdscr, db_levels, peak_db_levels, max_db_levels, max_peak_db_levels, is_on_status, clip_status)
                 
         finally:
             self.stop_recording()
             self.recorder.close()
     
-    def _draw_display(self, stdscr, db_levels, max_db_levels, is_on_status, clip_status):
+    def _draw_display(self, stdscr, db_levels, peak_db_levels, max_db_levels, max_peak_db_levels, is_on_status, clip_status):
         """Draw the VU meter display"""
         stdscr.clear()
         height, width = stdscr.getmaxyx()
@@ -234,10 +286,10 @@ class RecordingVUMeter(VUMeter):
         # Draw VU meters for each channel
         start_row = 2
         left_label_width = 10
-        right_label_width = 20
+        right_label_width = 30
         bar_width = width - left_label_width - right_label_width - 1
         
-        for ch, (db, max_db, is_on, has_clipped) in enumerate(zip(db_levels, max_db_levels, is_on_status, clip_status)):
+        for ch, (db, peak_db, max_db, max_peak_db, is_on, has_clipped) in enumerate(zip(db_levels, peak_db_levels, max_db_levels, max_peak_db_levels, is_on_status, clip_status)):
             row = start_row + ch * 2
             if row >= height - 1:
                 break
@@ -245,14 +297,17 @@ class RecordingVUMeter(VUMeter):
             normalized = (db - self.min_db) / self.db_range
             bar_length = int(normalized * bar_width)
             
+            peak_normalized = (max_peak_db - self.min_db) / self.db_range
+            peak_pos = int(peak_normalized * bar_width)
+            
             max_normalized = (max_db - self.min_db) / self.db_range
             max_pos = int(max_normalized * bar_width)
             
             left_label = f" {db:5.1f}dB "
             if has_clipped:
-                right_label = f" Peak:{max_db:5.1f} CLIP"
+                right_label = f" >{max_peak_db:5.1f} RMS:{max_db:5.1f} CLIP"
             else:
-                right_label = f" Peak:{max_db:5.1f}"
+                right_label = f" >{max_peak_db:5.1f} RMS:{max_db:5.1f}"
             
             try:
                 stdscr.addstr(row, 0, left_label)
@@ -270,7 +325,11 @@ class RecordingVUMeter(VUMeter):
                         else:
                             color = curses.color_pair(3)
                         stdscr.addch(row, pos, '█', color)
-                    elif i == max_pos and max_pos >= bar_length:
+                    # Draw peak indicator (>) at current peak position
+                    elif i == peak_pos and peak_pos >= bar_length:
+                        stdscr.addch(row, pos, '>', curses.color_pair(3) | curses.A_BOLD)
+                    # Draw max RMS indicator
+                    elif i == max_pos and max_pos >= bar_length and max_pos != peak_pos:
                         stdscr.addch(row, pos, '│', curses.color_pair(2) | curses.A_BOLD)
                 
                 stdscr.addstr(row, left_label_width + bar_width, right_label[:right_label_width])
@@ -315,14 +374,18 @@ def run_without_vumeter(recorder, vu_meter):
             
             # Process audio to determine if signal is on
             is_on_status = []
+            clip_status = []
             for ch in range(vu_meter.channels):
                 db = vu_meter.calculate_db(audio[:, ch])
+                peak_db = vu_meter.calculate_peak_db(audio[:, ch])
                 is_clipping = vu_meter.detect_clipping(audio[:, ch])
-                _, is_on, _ = vu_meter.update_history(ch, db, is_clipping)
+                _, _, is_on, has_clipped = vu_meter.update_history(ch, db, peak_db, is_clipping)
                 is_on_status.append(is_on)
+                clip_status.append(has_clipped)
             
             any_channel_on = any(is_on_status)
-            recorder.write_audio(audio, any_channel_on)
+            any_clipping = any(clip_status)
+            recorder.write_audio(audio, any_channel_on, any_clipping)
             
     except KeyboardInterrupt:
         pass
@@ -334,8 +397,12 @@ def run_without_vumeter(recorder, vu_meter):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Record audio with automatic start/stop')
-    parser.add_argument('--target', default='riaa.monitor',
-                        help='PipeWire target device (default: riaa.monitor)')
+    parser.add_argument('record_file', nargs='?', default='recording',
+                        help='Base filename for recordings (default: recording)')
+    parser.add_argument('--list-targets', action='store_true',
+                        help='List available PipeWire recording targets and exit')
+    parser.add_argument('--target', default=None,
+                        help='PipeWire target device (default: auto-detect first available)')
     parser.add_argument('--rate', type=int, default=96000,
                         help='Sample rate (default: 96000)')
     parser.add_argument('--channels', type=int, default=2,
@@ -350,12 +417,24 @@ def main():
                         help='Maximum dB (default: 0 dBFS)')
     parser.add_argument('--off-threshold', type=float, default=-60,
                         help='Threshold for on/off detection in dB (default: -60)')
-    parser.add_argument('--record-file', default='recording',
-                        help='Base filename for recordings (default: recording)')
+    parser.add_argument('--silence-duration', type=float, default=10,
+                        help='Duration of silence before recording stops in seconds (default: 10)')
+    parser.add_argument('--min-length', type=int, default=600,
+                        help='Minimum recording length in seconds (default: 600)')
     parser.add_argument('--no-vumeter', action='store_true',
                         help='Disable VU meter display')
     
     args = parser.parse_args()
+    
+    # Handle --list-targets
+    if args.list_targets:
+        return list_targets()
+    
+    # Validate or auto-select target
+    target, error_code = validate_and_select_target(args.target)
+    if error_code != 0:
+        return error_code
+    args.target = target
     
     # Determine bytes per sample
     if args.format in ["s32", "s32le"]:
@@ -371,7 +450,8 @@ def main():
         rate=args.rate,
         channels=args.channels,
         format=args.format,
-        bytes_per_sample=bytes_per_sample
+        bytes_per_sample=bytes_per_sample,
+        min_length=args.min_length
     )
     
     if args.no_vumeter:
@@ -384,7 +464,8 @@ def main():
             db_range=args.db_range,
             max_db=args.max_db,
             format=args.format,
-            off_threshold=args.off_threshold
+            off_threshold=args.off_threshold,
+            silence_duration=args.silence_duration
         )
         vu_meter.start_recording()
         run_without_vumeter(recorder, vu_meter)
@@ -399,7 +480,8 @@ def main():
             db_range=args.db_range,
             max_db=args.max_db,
             format=args.format,
-            off_threshold=args.off_threshold
+            off_threshold=args.off_threshold,
+            silence_duration=args.silence_duration
         )
         
         try:

@@ -9,10 +9,11 @@ import numpy as np
 import curses
 import sys
 import time
+from pipewire_utils import validate_and_select_target, list_targets
 
 
 class VUMeter:
-    def __init__(self, target="riaa.monitor", rate=96000, channels=2, update_interval=0.2, db_range=90, max_db=0, format="s32", off_threshold=-60):
+    def __init__(self, target="riaa.monitor", rate=96000, channels=2, update_interval=0.2, db_range=90, max_db=0, format="s32", off_threshold=-60, silence_duration=10):
         self.target = target
         self.rate = rate
         self.channels = channels
@@ -22,6 +23,7 @@ class VUMeter:
         self.min_db = max_db - db_range
         self.format = format
         self.off_threshold = off_threshold
+        self.silence_duration = silence_duration
         
         # Determine bytes per sample and numpy dtype
         if format in ["s32", "s32le"]:
@@ -41,11 +43,12 @@ class VUMeter:
         
         self.chunk_size = int(rate * channels * self.bytes_per_sample * update_interval)  # bytes per update
         self.process = None
-        # Keep 5 seconds of history
-        self.history_seconds = 5
+        # Keep history based on silence_duration for on/off detection
+        self.history_seconds = silence_duration
         self.history_size = int(self.history_seconds / update_interval)
         self.db_history = [[] for _ in range(channels)]
         self.clip_history = [[] for _ in range(channels)]  # Track clipping events
+        self.peak_history = [[] for _ in range(channels)]  # Track absolute peak values
         
     def start_recording(self):
         """Start the pw-record subprocess"""
@@ -80,7 +83,7 @@ class VUMeter:
             return None
             
     def calculate_db(self, audio_channel):
-        """Calculate dB level for a channel"""
+        """Calculate dB level for a channel (RMS)"""
         # Calculate RMS
         rms = np.sqrt(np.mean(audio_channel.astype(np.float64) ** 2))
         
@@ -94,29 +97,48 @@ class VUMeter:
         # Clamp to reasonable range
         return max(self.min_db, min(self.max_db, db))
     
+    def calculate_peak_db(self, audio_channel):
+        """Calculate peak dB level for a channel (absolute max)"""
+        # Get absolute maximum value
+        peak = np.max(np.abs(audio_channel))
+        
+        # Avoid log(0)
+        if peak < 1:
+            return self.min_db
+            
+        # Convert to dB (relative to max value for the format)
+        db = 20 * np.log10(peak / self.max_value)
+        
+        # Clamp to reasonable range
+        return max(self.min_db, min(self.max_db, db))
+    
     def detect_clipping(self, audio_channel):
         """Detect if any samples exceed 99.9% of full scale"""
         clip_threshold = 0.999 * self.max_value
         return np.any(np.abs(audio_channel) >= clip_threshold)
     
-    def update_history(self, channel, db_value, is_clipping):
-        """Update history for a channel and return max of last 5 seconds, on/off status, and clipping status"""
+    def update_history(self, channel, db_value, peak_db_value, is_clipping):
+        """Update history for a channel and return max RMS, max peak, on/off status, and clipping status"""
         self.db_history[channel].append(db_value)
+        self.peak_history[channel].append(peak_db_value)
         self.clip_history[channel].append(is_clipping)
         
-        # Keep only last N values (5 seconds worth)
+        # Keep only last N values (silence_duration worth)
         if len(self.db_history[channel]) > self.history_size:
             self.db_history[channel].pop(0)
+        if len(self.peak_history[channel]) > self.history_size:
+            self.peak_history[channel].pop(0)
         if len(self.clip_history[channel]) > self.history_size:
             self.clip_history[channel].pop(0)
         
         max_db = max(self.db_history[channel]) if self.db_history[channel] else self.min_db
-        # Source is "on" if any value in last 5 seconds exceeded threshold
+        max_peak_db = max(self.peak_history[channel]) if self.peak_history[channel] else self.min_db
+        # Source is "on" if any value in history exceeded threshold
         is_on = any(db > self.off_threshold for db in self.db_history[channel])
-        # Clipping detected if any clip in last 5 seconds
+        # Clipping detected if any clip in history
         has_clipped = any(self.clip_history[channel])
         
-        return max_db, is_on, has_clipped
+        return max_db, max_peak_db, is_on, has_clipped
     
     def is_any_channel_on(self):
         """Check if any channel is currently on"""
@@ -169,15 +191,20 @@ class VUMeter:
                 
                 # Calculate dB for each channel and update history
                 db_levels = []
+                peak_db_levels = []
                 max_db_levels = []
+                max_peak_db_levels = []
                 is_on_status = []
                 clip_status = []
                 for ch in range(self.channels):
                     db = self.calculate_db(audio[:, ch])
+                    peak_db = self.calculate_peak_db(audio[:, ch])
                     is_clipping = self.detect_clipping(audio[:, ch])
-                    max_db, is_on, has_clipped = self.update_history(ch, db, is_clipping)
+                    max_db, max_peak_db, is_on, has_clipped = self.update_history(ch, db, peak_db, is_clipping)
                     db_levels.append(db)
+                    peak_db_levels.append(peak_db)
                     max_db_levels.append(max_db)
+                    max_peak_db_levels.append(max_peak_db)
                     is_on_status.append(is_on)
                     clip_status.append(has_clipped)
                     
@@ -194,25 +221,29 @@ class VUMeter:
                 right_label_width = 20  # Width for " Peak: -XX.X CLIP"
                 bar_width = width - left_label_width - right_label_width - 1
                 
-                for ch, (db, max_db, is_on, has_clipped) in enumerate(zip(db_levels, max_db_levels, is_on_status, clip_status)):
+                for ch, (db, peak_db, max_db, max_peak_db, is_on, has_clipped) in enumerate(zip(db_levels, peak_db_levels, max_db_levels, max_peak_db_levels, is_on_status, clip_status)):
                     row = start_row + ch * 2
                     if row >= height - 1:
                         break
                         
-                    # Calculate bar length (from min_db to max_db)
+                    # Calculate bar length (from min_db to max_db) for RMS
                     normalized = (db - self.min_db) / self.db_range  # 0.0 to 1.0
                     bar_length = int(normalized * bar_width)
                     
-                    # Calculate max position
+                    # Calculate peak position for historical max peak
+                    peak_normalized = (max_peak_db - self.min_db) / self.db_range
+                    peak_pos = int(peak_normalized * bar_width)
+                    
+                    # Calculate max RMS position
                     max_normalized = (max_db - self.min_db) / self.db_range
                     max_pos = int(max_normalized * bar_width)
                     
-                    # Create labels
+                    # Create labels with both RMS and peak
                     left_label = f" {db:5.1f}dB "
                     if has_clipped:
-                        right_label = f" Peak:{max_db:5.1f} CLIP"
+                        right_label = f" >{max_peak_db:5.1f} RMS:{max_db:5.1f} CLIP"
                     else:
-                        right_label = f" Peak:{max_db:5.1f}"
+                        right_label = f" >{max_peak_db:5.1f} RMS:{max_db:5.1f}"
                     
                     try:
                         # Draw left label (current dB)
@@ -222,7 +253,7 @@ class VUMeter:
                         for i in range(bar_width):
                             pos = left_label_width + i
                             
-                            # Draw bar up to current level
+                            # Draw bar up to current RMS level
                             if i < bar_length:
                                 # Use gray if source is off, otherwise color based on level
                                 if not is_on:
@@ -234,8 +265,11 @@ class VUMeter:
                                 else:
                                     color = curses.color_pair(3)  # Red
                                 stdscr.addch(row, pos, '█', color)
-                            # Draw max indicator
-                            elif i == max_pos and max_pos >= bar_length:
+                            # Draw peak indicator (>) at current peak position
+                            elif i == peak_pos and peak_pos >= bar_length:
+                                stdscr.addch(row, pos, '>', curses.color_pair(3) | curses.A_BOLD)
+                            # Draw max RMS indicator
+                            elif i == max_pos and max_pos >= bar_length and max_pos != peak_pos:
                                 stdscr.addch(row, pos, '│', curses.color_pair(2) | curses.A_BOLD)
                         
                         # Draw right label (max dB)
@@ -277,8 +311,10 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='VU Meter for PipeWire audio')
-    parser.add_argument('--target', default='riaa.monitor', 
-                        help='PipeWire target device (default: riaa.monitor)')
+    parser.add_argument('--list-targets', action='store_true',
+                        help='List available PipeWire recording targets and exit')
+    parser.add_argument('--target', default=None,
+                        help='PipeWire target device (default: auto-detect first available)')
     parser.add_argument('--rate', type=int, default=96000,
                         help='Sample rate (default: 96000)')
     parser.add_argument('--channels', type=int, default=2,
@@ -293,8 +329,20 @@ def main():
                         help='Maximum dB (default: 0 dBFS)')
     parser.add_argument('--off-threshold', type=float, default=-60,
                         help='Threshold for on/off detection in dB (default: -60)')
+    parser.add_argument('--silence-duration', type=float, default=10,
+                        help='Duration of silence before signal is considered off in seconds (default: 10)')
     
     args = parser.parse_args()
+    
+    # Handle --list-targets
+    if args.list_targets:
+        sys.exit(list_targets())
+    
+    # Validate or auto-select target
+    target, error_code = validate_and_select_target(args.target)
+    if error_code != 0:
+        sys.exit(error_code)
+    args.target = target
     
     meter = VUMeter(
         target=args.target,
@@ -304,7 +352,8 @@ def main():
         db_range=args.db_range,
         max_db=args.max_db,
         format=args.format,
-        off_threshold=args.off_threshold
+        off_threshold=args.off_threshold,
+        silence_duration=args.silence_duration
     )
     
     try:
