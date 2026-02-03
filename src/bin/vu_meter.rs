@@ -1,4 +1,4 @@
-use autorec::{create_input_stream, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, SampleFormat, VUMeter};
+use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, SampleFormat, VUMeter};
 use std::env;
 use std::process;
 use std::thread;
@@ -177,21 +177,11 @@ fn main() {
     println!("VU Meter - {}:{} | Press Ctrl+C to quit", backend, device);
     println!();
 
-    // Main loop - simple text output (no curses in Rust for now)
+    // Main loop - clear and redraw like Python curses version
     loop {
         match process_audio_chunk(&mut meter) {
             Some(metrics) => {
-                print!("\r");
-                for (ch, m) in metrics.iter().enumerate() {
-                    let status = if m.is_on { "ON" } else { "OFF" };
-                    let clip = if m.has_clipped { " CLIP" } else { "" };
-                    print!(
-                        "Ch{}: {:5.1}dB (>{:5.1} RMS:{:5.1}) {} {}  ",
-                        ch, m.db, m.max_peak_db, m.max_db, status, clip
-                    );
-                }
-                use std::io::{self, Write};
-                io::stdout().flush().unwrap();
+                display_vu_meter(&metrics, db_range, max_db, None).ok();
             }
             None => {
                 println!("\nRecording stopped.");

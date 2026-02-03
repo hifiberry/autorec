@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 symphonia = { version = "0.5", features = ["mp3", "flac", "wav"] }
 pipewire = "0.8"
+crossterm = "0.27"
 
 [lib]
 name = "autorec"

@@ -1,6 +1,5 @@
-use autorec::{create_input_stream, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AudioRecorder, SampleFormat, VUMeter};
+use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AudioRecorder, SampleFormat, VUMeter};
 use std::env;
-use std::io::{self, Write};
 use std::process;
 use std::thread;
 use std::time::Duration;
@@ -221,24 +220,13 @@ fn main() {
                 recorder.write_audio(&audio_data, any_channel_on, any_clipping);
 
                 if !no_vumeter {
-                    // Display VU meter
-                    print!("\r");
+                    // Display VU meter with recording status
                     let rec_status = if recorder.is_recording() {
-                        "[RECORDING]"
+                        Some("[RECORDING]")
                     } else {
-                        ""
+                        None
                     };
-                    print!("{} ", rec_status);
-
-                    for (ch, m) in metrics.iter().enumerate() {
-                        let status = if m.is_on { "ON" } else { "OFF" };
-                        let clip = if m.has_clipped { " CLIP" } else { "" };
-                        print!(
-                            "Ch{}: {:5.1}dB (>{:5.1} RMS:{:5.1}) {} {}  ",
-                            ch, m.db, m.max_peak_db, m.max_db, status, clip
-                        );
-                    }
-                    io::stdout().flush().unwrap();
+                    display_vu_meter(&metrics, db_range, max_db, rec_status).ok();
                 }
             }
             None => {
