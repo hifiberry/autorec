@@ -3,3 +3,6 @@ __pycache__/*
 # Rust build artifacts
 /target/
 Cargo.lock
+
+# AI assistant notes (not for committing)
+.ai-notes

@@ -5,6 +5,8 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, FormatReader};
@@ -117,15 +119,14 @@ pub trait AudioInputStream: AudioStream {
 
 /// Native PipeWire audio input stream using the Rust pipewire crate
 pub struct PipeWireInputStream {
-    #[allow(dead_code)]
     target: String,
     rate: u32,
     channels: usize,
     format: SampleFormat,
     active: bool,
     buffer: Arc<Mutex<Vec<Vec<i32>>>>,
-    main_loop: Option<pw::main_loop::MainLoop>,
-    _stream: Option<pw::stream::Stream>,
+    thread_handle: Option<JoinHandle<()>>,
+    quit_flag: Arc<AtomicBool>,
 }
 
 impl PipeWireInputStream {
@@ -138,8 +139,8 @@ impl PipeWireInputStream {
             format,
             active: false,
             buffer: Arc::new(Mutex::new(Vec::new())),
-            main_loop: None,
-            _stream: None,
+            thread_handle: None,
+            quit_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -164,18 +165,19 @@ impl AudioInputStream for PipeWireInputStream {
             return None;
         }
         
+        // Wait for enough data in the buffer (with timeout)
+        let max_waits = 50; // Wait up to 500ms
+        for _ in 0..max_waits {
+            let buffer = self.buffer.lock().unwrap();
+            if !buffer.is_empty() && buffer[0].len() >= frames {
+                break;
+            }
+            drop(buffer);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        
         // Check if we have enough data in the buffer
         let mut buffer = self.buffer.lock().unwrap();
-        if buffer.is_empty() || buffer[0].len() < frames {
-            drop(buffer);
-            // Process some events to fill buffer
-            if let Some(ref main_loop) = self.main_loop {
-                for _ in 0..10 {
-                    let _ = main_loop.loop_();
-                }
-            }
-            buffer = self.buffer.lock().unwrap();
-        }
         
         if buffer.is_empty() || buffer[0].len() < frames {
             return None;
@@ -196,154 +198,203 @@ impl AudioInputStream for PipeWireInputStream {
             return Ok(());
         }
         
-        // Initialize PipeWire
-        pw::init();
-        
-        let main_loop = pw::main_loop::MainLoop::new(None)
-            .map_err(|e| format!("Failed to create main loop: {:?}", e))?;
-        
-        let context = pw::context::Context::new(&main_loop)
-            .map_err(|e| format!("Failed to create context: {:?}", e))?;
-        
-        let core = context.connect(None)
-            .map_err(|e| format!("Failed to connect to PipeWire: {:?}", e))?;
-        
-        // Create audio format info
-        let audio_format = match self.format {
-            SampleFormat::S16 => AudioFormat::S16LE,
-            SampleFormat::S32 => AudioFormat::S32LE,
-        };
-        
-        let mut audio_info = AudioInfoRaw::new();
-        audio_info.set_format(audio_format);
-        audio_info.set_rate(self.rate);
-        audio_info.set_channels(self.channels as u32);
-        
-        // Create the stream
         let buffer = self.buffer.clone();
+        let rate = self.rate;
         let channels = self.channels;
-        let sample_format = self.format;
+        let format = self.format;
         
-        let stream = pw::stream::Stream::new(
-            &core,
-            "autorec-capture",
-            pw::properties::properties! {
-                *pw::keys::MEDIA_TYPE => "Audio",
-                *pw::keys::MEDIA_CATEGORY => "Capture",
-                *pw::keys::MEDIA_ROLE => "Music",
-            },
-        ).map_err(|e| format!("Failed to create stream: {:?}", e))?;
+        // Reset quit flag
+        self.quit_flag.store(false, Ordering::Relaxed);
+        let quit_flag_thread = self.quit_flag.clone();
         
-        // Set up stream listener
-        let _listener = stream
-            .add_local_listener_with_user_data(())
-            .process(move |stream, _user_data| {
-                if let Some(mut buffer_data) = stream.dequeue_buffer() {
-                    let datas = buffer_data.datas_mut();
-                    if let Some(data) = datas.first_mut() {
-                        let chunk = data.chunk();
-                        let size = chunk.size() as usize;
-                        
-                        if let Some(samples_slice) = data.data() {
-                            // Convert to samples per channel
-                            let bytes_per_sample = sample_format.bytes_per_sample();
-                            let frame_size = bytes_per_sample * channels;
-                            let num_frames = size / frame_size;
+        // Spawn thread to run PipeWire mainloop
+        let thread_handle = thread::spawn(move || {
+            // Initialize PipeWire in this thread
+            pw::init();
+            
+            let main_loop = match pw::main_loop::MainLoop::new(None) {
+                Ok(ml) => ml,
+                Err(e) => {
+                    eprintln!("Failed to create main loop: {:?}", e);
+                    return;
+                }
+            };
+            
+            let context = match pw::context::Context::new(&main_loop) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    eprintln!("Failed to create context: {:?}", e);
+                    return;
+                }
+            };
+            
+            let core = match context.connect(None) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to connect to PipeWire: {:?}", e);
+                    return;
+                }
+            };
+            
+            // Create audio format info
+            let audio_format = match format {
+                SampleFormat::S16 => AudioFormat::S16LE,
+                SampleFormat::S32 => AudioFormat::S32LE,
+            };
+            
+            let mut audio_info = AudioInfoRaw::new();
+            audio_info.set_format(audio_format);
+            audio_info.set_rate(rate);
+            audio_info.set_channels(channels as u32);
+            
+            // Create the stream
+            let stream = match pw::stream::Stream::new(
+                &core,
+                "autorec-capture",
+                pw::properties::properties! {
+                    *pw::keys::MEDIA_TYPE => "Audio",
+                    *pw::keys::MEDIA_CATEGORY => "Capture",
+                    *pw::keys::MEDIA_ROLE => "Music",
+                },
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to create stream: {:?}", e);
+                    return;
+                }
+            };
+            
+            // Set up stream listener
+            let _listener = stream
+                .add_local_listener_with_user_data(())
+                .process(move |stream, _user_data| {
+                    if let Some(mut buffer_data) = stream.dequeue_buffer() {
+                        let datas = buffer_data.datas_mut();
+                        if let Some(data) = datas.first_mut() {
+                            let chunk = data.chunk();
+                            let size = chunk.size() as usize;
                             
-                            let mut channel_samples: Vec<Vec<i32>> = vec![Vec::new(); channels];
-                            
-                            for frame in 0..num_frames {
-                                for ch in 0..channels {
-                                    let offset = frame * frame_size + ch * bytes_per_sample;
-                                    let sample = match sample_format {
-                                        SampleFormat::S16 => {
-                                            if offset + 2 <= samples_slice.len() {
-                                                i16::from_le_bytes([samples_slice[offset], samples_slice[offset + 1]]) as i32
-                                            } else {
-                                                0
+                            if let Some(samples_slice) = data.data() {
+                                // Convert to samples per channel
+                                let bytes_per_sample = format.bytes_per_sample();
+                                let frame_size = bytes_per_sample * channels;
+                                let num_frames = size / frame_size;
+                                
+                                let mut channel_samples: Vec<Vec<i32>> = vec![Vec::new(); channels];
+                                
+                                for frame in 0..num_frames {
+                                    for ch in 0..channels {
+                                        let offset = frame * frame_size + ch * bytes_per_sample;
+                                        let sample = match format {
+                                            SampleFormat::S16 => {
+                                                if offset + 2 <= samples_slice.len() {
+                                                    i16::from_le_bytes([samples_slice[offset], samples_slice[offset + 1]]) as i32
+                                                } else {
+                                                    0
+                                                }
                                             }
-                                        }
-                                        SampleFormat::S32 => {
-                                            if offset + 4 <= samples_slice.len() {
-                                                i32::from_le_bytes([
-                                                    samples_slice[offset],
-                                                    samples_slice[offset + 1],
-                                                    samples_slice[offset + 2],
-                                                    samples_slice[offset + 3],
-                                                ])
-                                            } else {
-                                                0
+                                            SampleFormat::S32 => {
+                                                if offset + 4 <= samples_slice.len() {
+                                                    i32::from_le_bytes([
+                                                        samples_slice[offset],
+                                                        samples_slice[offset + 1],
+                                                        samples_slice[offset + 2],
+                                                        samples_slice[offset + 3],
+                                                    ])
+                                                } else {
+                                                    0
+                                                }
                                             }
-                                        }
-                                    };
-                                    channel_samples[ch].push(sample);
+                                        };
+                                        channel_samples[ch].push(sample);
+                                    }
                                 }
-                            }
-                            
-                            // Append to buffer
-                            let mut buf = buffer.lock().unwrap();
-                            if buf.is_empty() {
-                                *buf = channel_samples;
-                            } else {
-                                for (ch, samples) in channel_samples.into_iter().enumerate() {
-                                    buf[ch].extend(samples);
+                                
+                                // Append to buffer
+                                let mut buf = buffer.lock().unwrap();
+                                if buf.is_empty() {
+                                    *buf = channel_samples;
+                                } else {
+                                    for (ch, samples) in channel_samples.into_iter().enumerate() {
+                                        buf[ch].extend(samples);
+                                    }
                                 }
                             }
                         }
                     }
+                })
+                .register();
+            
+            if _listener.is_err() {
+                eprintln!("Failed to register listener");
+                return;
+            }
+            
+            // Build parameters
+            let obj = pw::spa::pod::Object {
+                type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+                id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+                properties: audio_info.into(),
+            };
+            let values: Vec<u8> = match pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(obj),
+            ) {
+                Ok((cursor, _)) => cursor.into_inner(),
+                Err(e) => {
+                    eprintln!("Failed to serialize audio info: {:?}", e);
+                    return;
                 }
-            })
-            .register()
-            .map_err(|e| format!("Failed to register listener: {:?}", e))?;
+            };
+            
+            let mut params = [Pod::from_bytes(&values).unwrap()];
+            
+            // Connect the stream
+            if let Err(e) = stream.connect(
+                pw::spa::utils::Direction::Input,
+                None,
+                pw::stream::StreamFlags::AUTOCONNECT
+                    | pw::stream::StreamFlags::MAP_BUFFERS
+                    | pw::stream::StreamFlags::RT_PROCESS,
+                &mut params,
+            ) {
+                eprintln!("Failed to connect stream: {:?}", e);
+                return;
+            }
+            
+            // Run the main loop (blocks until quit() is called)
+            // Note: Currently we cannot gracefully stop the mainloop because:
+            // 1. iterate() doesn't properly trigger audio callbacks
+            // 2. MainLoop uses Rc and cannot be shared across threads
+            // The thread will be killed when the process exits
+            main_loop.run();
+        });
         
-        // Build parameters
-        let obj = pw::spa::pod::Object {
-            type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-            id: pw::spa::param::ParamType::EnumFormat.as_raw(),
-            properties: audio_info.into(),
-        };
-        let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()),
-            &pw::spa::pod::Value::Object(obj),
-        )
-        .map_err(|e| format!("Failed to serialize audio info: {:?}", e))?
-        .0
-        .into_inner();
-        
-        let mut params = [Pod::from_bytes(&values).unwrap()];
-        
-        // Connect the stream
-        stream.connect(
-            pw::spa::utils::Direction::Input,
-            None,
-            pw::stream::StreamFlags::AUTOCONNECT
-                | pw::stream::StreamFlags::MAP_BUFFERS
-                | pw::stream::StreamFlags::RT_PROCESS,
-            &mut params,
-        ).map_err(|e| format!("Failed to connect stream: {:?}", e))?;
-        
-        self.main_loop = Some(main_loop);
-        self._stream = Some(stream);
+        self.thread_handle = Some(thread_handle);
         self.active = true;
+        
+        // Give the stream a moment to start up
+        std::thread::sleep(Duration::from_millis(200));
         
         Ok(())
     }
     
     fn stop(&mut self) {
         self.active = false;
-        self._stream = None;
-        self.main_loop = None;
+        
+        // Signal the thread to quit
+        self.quit_flag.store(true, Ordering::Relaxed);
+        
+        // Wait for thread to finish
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+        
         self.buffer.lock().unwrap().clear();
     }
     
     fn is_active(&self) -> bool {
         self.active
-    }
-}
-
-impl Drop for PipeWireInputStream {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 

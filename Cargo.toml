@@ -22,3 +22,7 @@ path = "src/bin/record.rs"
 [[bin]]
 name = "show_sources"
 path = "src/bin/show_sources.rs"
+
+[[bin]]
+name = "test_pipewire"
+path = "src/bin/test_pipewire.rs"
