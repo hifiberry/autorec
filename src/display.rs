@@ -56,7 +56,7 @@ pub fn display_vu_meter(
     
     // Display recording status if provided
     if let Some(status) = recording_status {
-        println!("{}", status);
+        print!("{}\r\n", status);
     }
     
     // Draw each channel
@@ -101,7 +101,7 @@ pub fn display_vu_meter(
         let status = if m.is_on { "ON " } else { "OFF" };
         let clip = if m.has_clipped { " CLIP" } else { "     " };
         
-        println!("| >{:5.1} RMS:{:5.1} {}{}", m.max_peak_db, m.max_db, status, clip);
+        print!("| >{:5.1} RMS:{:5.1} {}{}\r\n", m.max_peak_db, m.max_db, status, clip);
         
         // Print scale line (only for first channel)
         if ch == 0 {
@@ -131,7 +131,7 @@ pub fn display_vu_meter(
                 print!("{}", marker_str);
                 last_pos = marker_pos + marker_str.len();
             }
-            println!();
+            print!("\r\n");
         }
     }
     

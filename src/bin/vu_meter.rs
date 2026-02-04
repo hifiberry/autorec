@@ -180,7 +180,7 @@ fn main() {
     // Main loop - clear and redraw like Python curses version
     loop {
         match process_audio_chunk(&mut meter) {
-            Some(metrics) => {
+            Some((metrics, _audio_data)) => {
                 display_vu_meter(&metrics, db_range, max_db, None).ok();
             }
             None => {

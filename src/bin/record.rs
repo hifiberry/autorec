@@ -3,6 +3,10 @@ use std::env;
 use std::process;
 use std::thread;
 use std::time::Duration;
+use crossterm::{
+    event::{poll, read, Event, KeyCode, KeyEvent},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
 
 fn print_usage() {
     println!("Audio recording program with automatic start/stop based on signal detection");
@@ -14,6 +18,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  --list-targets           List available PipeWire recording targets and exit");
+    println!("  --show-defaults          Show default configuration values and exit");
     println!("  --source <SOURCE>        Audio source address:");
     println!("                             pipewire:device or pw:device");
     println!("                             alsa:hw:0,0 or alsa:default");
@@ -30,7 +35,9 @@ fn print_usage() {
     println!("  --off-threshold <THRESH> Threshold for on/off detection in dB (default: -60)");
     println!("  --silence-duration <SEC> Duration of silence before recording stops (default: 10)");
     println!("  --min-length <SEC>       Minimum recording length in seconds (default: 600)");
+    println!("  --duration <SEC>         Maximum recording duration in seconds (optional)");
     println!("  --no-vumeter             Disable VU meter display (simple text output)");
+    println!("  --no-keyboard            Disable keyboard shortcuts (no raw mode)");
     println!("  --help                   Show this help message");
     println!();
     println!("Examples:");
@@ -55,6 +62,8 @@ fn main() {
     let mut silence_duration = 10.0;
     let mut min_length = 600.0;
     let mut no_vumeter = false;
+    let mut no_keyboard = false;
+    let mut duration: Option<f64> = None;
 
     let mut i = 1;
     let mut positional_args = Vec::new();
@@ -63,6 +72,31 @@ fn main() {
         match args[i].as_str() {
             "--list-targets" => {
                 process::exit(list_targets());
+            }
+            "--show-defaults" => {
+                println!("Default settings:");
+                
+                // Auto-detect the default source
+                let (selected_target, error_code) = validate_and_select_target(None, false);
+                let source_info = if error_code == 0 && selected_target.is_some() {
+                    format!("pipewire:{}", selected_target.unwrap())
+                } else {
+                    "No PipeWire source available".to_string()
+                };
+                
+                println!("  Audio source:       {} (auto-detected)", source_info);
+                println!("  Sample rate:        96000 Hz");
+                println!("  Channels:           2");
+                println!("  Format:             s32");
+                println!("  Update interval:    0.2 seconds");
+                println!("  dB range:           90 dB");
+                println!("  Maximum dB:         0 dB");
+                println!("  Off threshold:      -60 dB");
+                println!("  Silence duration:   10 seconds");
+                println!("  Min recording:      600 seconds (10 minutes)");
+                println!("  VU meter:           enabled");
+                println!("  Keyboard shortcuts: enabled");
+                process::exit(0);
             }
             "--source" | "--target" => {
                 if i + 1 < args.len() {
@@ -126,6 +160,16 @@ fn main() {
             }
             "--no-vumeter" => {
                 no_vumeter = true;
+            }
+            "--no-keyboard" => {
+                no_keyboard = true;
+            }
+            "--duration" => {
+                if i + 1 < args.len() {
+                    duration = Some(args[i + 1].parse().unwrap_or(60.0));
+                    min_length = 0.0;  // Disable min length check when using duration
+                    i += 1;
+                }
             }
             "--help" | "-h" => {
                 print_usage();
@@ -202,22 +246,54 @@ fn main() {
     // Wait a moment for process to start
     thread::sleep(Duration::from_millis(100));
 
-    println!("Recording started. Press Ctrl+C to stop.");
+    if no_keyboard {
+        println!("Recording started. Press Ctrl+C to stop.");
+    } else {
+        println!("Recording started. Press ESC or 'q' to quit.");
+        // Enable raw mode for keyboard input
+        enable_raw_mode().ok();
+    }
     println!("Waiting for signal...");
     println!();
 
+    // Track start time for duration limit
+    let start_time = std::time::Instant::now();
+
     // Main loop
     loop {
-        match process_audio_chunk(&mut meter) {
-            Some(metrics) => {
-                let any_channel_on = metrics.iter().any(|m| m.is_on);
-                let any_clipping = metrics.iter().any(|m| m.has_clipped);
+        // Check for keyboard input (non-blocking) if keyboard mode is enabled
+        if !no_keyboard && poll(Duration::from_millis(0)).unwrap_or(false) {
+            if let Ok(Event::Key(KeyEvent { code, .. })) = read() {
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        disable_raw_mode().ok();
+                        println!("\nExiting...");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
-                // Get audio data for recording
-                // Note: In a real implementation, we'd need to pass the actual audio samples
-                // For now, we'll use a simplified approach
-                let audio_data: Vec<Vec<i32>> = vec![vec![0]; channels];
-                recorder.write_audio(&audio_data, any_channel_on, any_clipping);
+        // Check if duration limit has been reached
+        if let Some(max_duration) = duration {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed >= max_duration {
+                if !no_keyboard {
+                    disable_raw_mode().ok();
+                }
+                println!("\nDuration limit reached. Exiting...");
+                break;
+            }
+        }
+
+        // Read and process audio data once
+        match process_audio_chunk(&mut meter) {
+            Some((metrics, audio_data)) => {
+                let any_channel_on = metrics.iter().any(|m| m.is_on);
+
+                // Write the actual audio data to the recorder
+                recorder.write_audio(&audio_data, any_channel_on);
 
                 if !no_vumeter {
                     // Display VU meter with recording status
@@ -230,6 +306,9 @@ fn main() {
                 }
             }
             None => {
+                if !no_keyboard {
+                    disable_raw_mode().ok();
+                }
                 println!("\nRecording stopped.");
                 break;
             }

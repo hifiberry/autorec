@@ -181,7 +181,7 @@ impl<S: AudioInputStream> VUMeter<S> {
     }
 }
 
-pub fn process_audio_chunk<S: AudioInputStream>(vu_meter: &mut VUMeter<S>) -> Option<Vec<ChannelMetrics>> {
+pub fn process_audio_chunk<S: AudioInputStream>(vu_meter: &mut VUMeter<S>) -> Option<(Vec<ChannelMetrics>, Vec<Vec<i32>>)> {
     let audio = vu_meter.read_audio_chunk()?;
     let mut metrics = Vec::new();
 
@@ -202,7 +202,7 @@ pub fn process_audio_chunk<S: AudioInputStream>(vu_meter: &mut VUMeter<S>) -> Op
         });
     }
 
-    Some(metrics)
+    Some((metrics, audio))
 }
 
 #[derive(Debug)]

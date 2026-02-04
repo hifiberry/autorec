@@ -12,7 +12,6 @@ use crate::vu_meter::SampleFormat;
 enum RecorderCommand {
     Start,
     Write(Vec<i32>),
-    Clipping,
     Stop,
 }
 
@@ -27,7 +26,6 @@ pub struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
     current_file: Arc<Mutex<Option<String>>>,
     recording_start_time: Arc<Mutex<Option<Instant>>>,
-    clipping_detected: Arc<Mutex<bool>>,
     next_file_number: Arc<Mutex<usize>>,
 
     sender: Sender<RecorderCommand>,
@@ -50,9 +48,7 @@ impl AudioRecorder {
         };
 
         let mut n = 1;
-        while Path::new(&format!("{}.{}.wav", base_no_ext, n)).exists()
-            || Path::new(&format!("{}.{}.clipped.wav", base_no_ext, n)).exists()
-        {
+        while Path::new(&format!("{}.{}.wav", base_no_ext, n)).exists() {
             n += 1;
         }
 
@@ -61,7 +57,6 @@ impl AudioRecorder {
         let recording = Arc::new(Mutex::new(false));
         let current_file = Arc::new(Mutex::new(None));
         let recording_start_time = Arc::new(Mutex::new(None));
-        let clipping_detected = Arc::new(Mutex::new(false));
         let next_file_number = Arc::new(Mutex::new(n));
 
         // Start recording thread
@@ -74,7 +69,6 @@ impl AudioRecorder {
             let recording = Arc::clone(&recording);
             let current_file = Arc::clone(&current_file);
             let recording_start_time = Arc::clone(&recording_start_time);
-            let clipping_detected = Arc::clone(&clipping_detected);
             let next_file_number = Arc::clone(&next_file_number);
 
             thread::spawn(move || {
@@ -88,7 +82,6 @@ impl AudioRecorder {
                     recording,
                     current_file,
                     recording_start_time,
-                    clipping_detected,
                     next_file_number,
                 );
             })
@@ -103,7 +96,6 @@ impl AudioRecorder {
             recording,
             current_file,
             recording_start_time,
-            clipping_detected,
             next_file_number,
             sender,
             thread_handle: Some(thread_handle),
@@ -129,7 +121,6 @@ impl AudioRecorder {
         recording: Arc<Mutex<bool>>,
         current_file: Arc<Mutex<Option<String>>>,
         recording_start_time: Arc<Mutex<Option<Instant>>>,
-        clipping_detected: Arc<Mutex<bool>>,
         next_file_number: Arc<Mutex<usize>>,
     ) {
         let mut wav_writer: Option<WavWriter> = None;
@@ -139,8 +130,10 @@ impl AudioRecorder {
                 RecorderCommand::Start => {
                     let is_recording = *recording.lock().unwrap();
                     if !is_recording {
-                        let file_num = *next_file_number.lock().unwrap();
-                        let filename = Self::get_next_filename(&base_filename, file_num);
+                        let mut file_number = next_file_number.lock().unwrap();
+                        let filename = Self::get_next_filename(&base_filename, *file_number);
+                        *file_number += 1;
+                        drop(file_number);
 
                         match WavWriter::new(&filename, rate, channels, format) {
                             Ok(writer) => {
@@ -148,7 +141,6 @@ impl AudioRecorder {
                                 *current_file.lock().unwrap() = Some(filename.clone());
                                 *recording.lock().unwrap() = true;
                                 *recording_start_time.lock().unwrap() = Some(Instant::now());
-                                *clipping_detected.lock().unwrap() = false;
                                 println!("\nStarted recording to {}", filename);
                             }
                             Err(e) => {
@@ -163,9 +155,6 @@ impl AudioRecorder {
                             eprintln!("\nError writing audio data: {}", e);
                         }
                     }
-                }
-                RecorderCommand::Clipping => {
-                    *clipping_detected.lock().unwrap() = true;
                 }
                 RecorderCommand::Stop => {
                     if let Some(mut writer) = wav_writer.take() {
@@ -192,29 +181,10 @@ impl AudioRecorder {
                                 eprintln!("\nError deleting file: {}", e);
                             }
                         } else {
-                            let was_clipped = *clipping_detected.lock().unwrap();
-                            let _final_file = if was_clipped {
-                                let clipped_file = filename.replace(".wav", ".clipped.wav");
-                                if let Err(e) = std::fs::rename(&filename, &clipped_file) {
-                                    eprintln!("\nError renaming file: {}", e);
-                                    filename.clone()
-                                } else {
-                                    println!(
-                                        "\nStopped recording to {} (duration: {:.1}s) [CLIPPED]",
-                                        clipped_file, duration
-                                    );
-                                    clipped_file
-                                }
-                            } else {
-                                println!(
-                                    "\nStopped recording to {} (duration: {:.1}s)",
-                                    filename, duration
-                                );
-                                filename
-                            };
-
-                            // Only increment counter when file is kept
-                            *next_file_number.lock().unwrap() += 1;
+                            println!(
+                                "\nStopped recording to {} (duration: {:.1}s)",
+                                filename, duration
+                            );
                         }
 
                         *recording_start_time.lock().unwrap() = None;
@@ -224,7 +194,7 @@ impl AudioRecorder {
         }
     }
 
-    pub fn write_audio(&self, audio_data: &[Vec<i32>], is_on: bool, has_clipped: bool) {
+    pub fn write_audio(&self, audio_data: &[Vec<i32>], is_on: bool) {
         if is_on {
             let is_recording = *self.recording.lock().unwrap();
             if !is_recording {
@@ -245,10 +215,6 @@ impl AudioRecorder {
             }
 
             let _ = self.sender.send(RecorderCommand::Write(interleaved));
-
-            if has_clipped {
-                let _ = self.sender.send(RecorderCommand::Clipping);
-            }
         } else {
             let is_recording = *self.recording.lock().unwrap();
             if is_recording {
