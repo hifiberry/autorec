@@ -17,8 +17,8 @@ name = "vu_meter"
 path = "src/bin/vu_meter.rs"
 
 [[bin]]
-name = "record"
-path = "src/bin/record.rs"
+name = "autorecord"
+path = "src/bin/autorecord.rs"
 
 [[bin]]
 name = "show_sources"

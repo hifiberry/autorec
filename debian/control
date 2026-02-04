@@ -1,0 +1,18 @@
+Source: hifiberry-autorec
+Section: sound
+Priority: optional
+Maintainer: HiFiBerry <support@hifiberry.com>
+Build-Depends: debhelper (>= 10), cargo, rustc, libpipewire-0.3-dev, pkg-config
+Standards-Version: 4.5.0
+Homepage: https://github.com/hifiberry/autorec
+
+Package: hifiberry-autorec
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, pipewire
+Description: Audio recording tools with automatic start/stop detection
+ HiFiBerry AutoRec provides tools for audio recording with automatic
+ signal detection and VU meter display.
+ .
+ This package includes:
+  - autorecord: Automatic recording with signal detection
+  - vu_meter: Real-time VU meter display

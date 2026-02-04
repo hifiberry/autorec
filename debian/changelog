@@ -1,0 +1,10 @@
+hifiberry-autorec (0.1.0) stable; urgency=medium
+
+  * Initial release
+  * Audio recording with automatic start/stop
+  * VU meter display
+  * Fixed audio sample loss bug
+  * Added --duration option
+  * File numbering with automatic reuse
+
+ -- HiFiBerry <support@hifiberry.com>  Tue, 04 Feb 2026 18:00:00 +0000
