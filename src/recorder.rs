@@ -398,7 +398,7 @@ mod tests {
 
         // Simulate audio with signal
         let audio_data = vec![vec![1000; 100], vec![1000; 100]];
-        recorder.write_audio(&audio_data, true, false);
+        recorder.write_audio(&audio_data, true);
 
         // Give thread time to process
         std::thread::sleep(Duration::from_millis(100));
@@ -407,7 +407,7 @@ mod tests {
         assert!(recorder.is_recording());
 
         // Stop and cleanup
-        recorder.write_audio(&audio_data, false, false);
+        recorder.write_audio(&audio_data, false);
         std::thread::sleep(Duration::from_millis(100));
         recorder.close();
 

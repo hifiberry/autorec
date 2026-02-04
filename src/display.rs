@@ -27,7 +27,14 @@ use crate::vu_meter::ChannelMetrics;
 /// ```no_run
 /// use autorec::{display_vu_meter, ChannelMetrics};
 /// 
-/// let metrics = vec![ChannelMetrics::default()];
+/// let metrics = vec![ChannelMetrics {
+///     db: -20.0,
+///     peak_db: -15.0,
+///     max_db: -10.0,
+///     max_peak_db: -8.0,
+///     is_on: true,
+///     has_clipped: false,
+/// }];
 /// display_vu_meter(&metrics, 60.0, 0.0, None).ok();
 /// ```
 pub fn display_vu_meter(
