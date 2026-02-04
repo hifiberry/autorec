@@ -130,9 +130,8 @@ impl AudioRecorder {
                 RecorderCommand::Start => {
                     let is_recording = *recording.lock().unwrap();
                     if !is_recording {
-                        let mut file_number = next_file_number.lock().unwrap();
+                        let file_number = next_file_number.lock().unwrap();
                         let filename = Self::get_next_filename(&base_filename, *file_number);
-                        *file_number += 1;
                         drop(file_number);
 
                         match WavWriter::new(&filename, rate, channels, format) {
@@ -180,11 +179,15 @@ impl AudioRecorder {
                             if let Err(e) = std::fs::remove_file(&filename) {
                                 eprintln!("\nError deleting file: {}", e);
                             }
+                            // Don't increment file number since file was deleted
                         } else {
                             println!(
                                 "\nStopped recording to {} (duration: {:.1}s)",
                                 filename, duration
                             );
+                            // Increment file number for next recording since this file was kept
+                            let mut file_number = next_file_number.lock().unwrap();
+                            *file_number += 1;
                         }
 
                         *recording_start_time.lock().unwrap() = None;
