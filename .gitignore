@@ -5,4 +5,4 @@ __pycache__/*
 Cargo.lock
 
 # AI assistant notes (not for committing)
-.ai-notes
+.ai-notes*.wav
