@@ -1,0 +1,135 @@
+.TH PAUSE_ANALYZER 1 "February 2026" "HiFiBerry AutoRec 0.1.4" "User Commands"
+.SH NAME
+pause_analyzer \- analyze audio files for pause detection validation
+.SH SYNOPSIS
+.B pause_analyzer
+[\fIOPTIONS\fR] \fIAUDIO_FILE\fR
+.SH DESCRIPTION
+.B pause_analyzer
+analyzes WAV audio files to test and validate pause detection algorithms. 
+It provides detailed output about detected pauses, noise floor, music levels, 
+and RMS statistics.
+
+This tool is useful for:
+.br
+\- Testing pause detection parameters
+.br
+\- Validating recording quality
+.br
+\- Troubleshooting autorecord settings
+.br
+\- Analyzing vinyl recordings for optimal split points
+
+.SH OPTIONS
+.TP
+.BR \-\-min\-pause " " \fISECONDS\fR
+Minimum pause duration to detect (default: 2.0 seconds).
+
+.TP
+.BR \-\-threshold " " \fIDB\fR
+Pause detection threshold in dB below music level (default: 12.0).
+
+.TP
+.BR \-\-strategy " " \fISTRATEGY\fR
+Detection strategy to use. Options:
+.br
+  \fBdepth\fR    - Simple depth-based (default)
+.br
+  \fBpeak\fR     - Peak-aware detection
+.br
+  \fBadaptive\fR - Adaptive threshold
+.br
+  \fBall\fR      - Compare all strategies
+
+.TP
+.BR \-\-chunk\-size " " \fISECONDS\fR
+RMS analysis chunk size in seconds (default: 0.1).
+
+.TP
+.BR \-\-smooth\-window " " \fICHUNKS\fR
+Smoothing window size in chunks (default: 10).
+
+.TP
+.BR \-\-dump
+Generate CSV dump of RMS values for external analysis.
+
+.TP
+.BR \-\-plot
+Generate ASCII plot of audio levels (requires gnuplot).
+
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output with detailed detection information.
+
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+
+.SH OUTPUT
+The analyzer displays:
+.br
+\- File information (format, duration, sample rate)
+.br
+\- Audio level statistics (noise floor, music level, dynamic range)
+.br
+\- Detected pause positions and durations
+.br
+\- Recommended pause detection parameters
+.br
+\- Quality assessment
+
+.SH EXAMPLES
+.TP
+Analyze recording with default settings:
+.B pause_analyzer recording.wav
+
+.TP
+Test different threshold:
+.B pause_analyzer \-\-threshold 15.0 vinyl_side.wav
+
+.TP
+Compare all detection strategies:
+.B pause_analyzer \-\-strategy all recording.wav
+
+.TP
+Generate detailed analysis with plot:
+.B pause_analyzer \-\-verbose \-\-dump \-\-plot recording.wav
+
+.TP
+Analyze with tighter pause detection:
+.B pause_analyzer \-\-min\-pause 1.5 \-\-threshold 10.0 recording.wav
+
+.SH DETECTION STRATEGIES
+.TP
+.B depth
+Simple depth-based detection. Measures how far below music level 
+the audio drops. Fast and reliable for clean recordings.
+
+.TP
+.B peak
+Peak-aware detection. Considers peak levels in surrounding context 
+to avoid false positives during dynamic passages.
+
+.TP
+.B adaptive
+Adaptive threshold detection. Dynamically adjusts threshold based 
+on local audio characteristics. Best for varying level recordings.
+
+.SH FILES
+.TP
+.I *.csv
+RMS dump files (with \-\-dump option)
+.TP
+.I *.png
+Plot files (with \-\-plot option)
+
+.SH SEE ALSO
+.BR autorecord (1),
+.BR vu_meter (1),
+.BR boundary_finder (1)
+
+.SH AUTHOR
+Written for HiFiBerry OS.
+
+.SH BUGS
+Report bugs to: https://github.com/hifiberry/hifiberry-os

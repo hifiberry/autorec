@@ -1,5 +1,7 @@
+pub mod audio_analysis;
 pub mod audio_stream;
 pub mod config;
+pub mod cuefile;
 pub mod decibel;
 pub mod detection_strategies;
 pub mod display;
@@ -9,6 +11,7 @@ pub mod pipewire_utils;
 pub mod recorder;
 pub mod song_detect;
 pub mod vu_meter;
+pub mod wavfile;
 
 // Shazam fingerprinting — mounted from shazamio-core submodule unchanged.
 // This makes `crate::fingerprinting::*` paths inside shazamio-core resolve correctly.

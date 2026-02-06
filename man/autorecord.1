@@ -1,0 +1,111 @@
+.TH AUTORECORD 1 "February 2026" "HiFiBerry AutoRec 0.1.4" "User Commands"
+.SH NAME
+autorecord \- automatic audio recording with pause detection
+.SH SYNOPSIS
+.B autorecord
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B autorecord
+is an intelligent audio recording tool that automatically detects pauses 
+in audio streams and splits recordings into separate files. It monitors 
+PipeWire audio sources and starts recording when audio is detected, 
+automatically stopping and creating new files during pauses.
+
+Designed primarily for vinyl recording workflows, autorecord can capture 
+entire vinyl sides while intelligently splitting tracks at pause points.
+
+.SH OPTIONS
+.TP
+.BR \-s ", " \-\-source " " \fISOURCE\fR
+Specify the audio source to record from. Can be a PipeWire source name 
+or numeric ID. If not specified, an interactive selection menu is shown.
+
+.TP
+.BR \-o ", " \-\-output " " \fIDIRECTORY\fR
+Set the output directory for recorded files (default: current directory).
+
+.TP
+.BR \-p ", " \-\-prefix " " \fIPREFIX\fR
+Set filename prefix for recordings (default: "recording").
+
+.TP
+.BR \-f ", " \-\-format " " \fIFORMAT\fR
+Audio format: s16 (16-bit) or s32 (32-bit, default).
+
+.TP
+.BR \-r ", " \-\-rate " " \fIRATE\fR
+Sample rate in Hz (default: 96000). Common values: 44100, 48000, 96000.
+
+.TP
+.BR \-\-min\-pause " " \fISECONDS\fR
+Minimum pause duration to split recordings (default: 2.0 seconds).
+
+.TP
+.BR \-\-threshold " " \fIDB\fR
+Pause detection threshold in dB below music level (default: 12.0).
+
+.TP
+.BR \-\-pre\-buffer " " \fISECONDS\fR
+Seconds of audio to buffer before pause detection starts (default: 5.0).
+
+.TP
+.BR \-\-vu
+Show VU meter during recording.
+
+.TP
+.BR \-\-no\-split
+Disable automatic file splitting on pauses.
+
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output with detailed detection information.
+
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+
+.SH EXAMPLES
+.TP
+Record from default source with automatic splitting:
+.B autorecord
+
+.TP
+Record vinyl with custom pause detection:
+.B autorecord \-\-min\-pause 3.0 \-\-threshold 15.0 \-\-prefix vinyl_album
+
+.TP
+Record at 192kHz with VU meter:
+.B autorecord \-\-rate 192000 \-\-vu
+
+.TP
+Record specific source without splitting:
+.B autorecord \-\-source "AT-LP5X Analog Stereo" \-\-no\-split
+
+.SH FILES
+Output files are named: \fIPREFIX\fR_\fITIMESTAMP\fR_\fINUMBER\fR.wav
+
+Examples:
+.br
+recording_20260206_143022_001.wav
+.br
+vinyl_album_20260206_143022_002.wav
+
+.SH PAUSE DETECTION
+The adaptive pause detector analyzes audio in real-time:
+.br
+\- Tracks noise floor and music level dynamically
+.br
+\- Adapts to varying audio levels throughout recording
+.br
+\- Requires sustained low energy to trigger pause
+.br
+\- Buffers audio to avoid cutting off track starts
+
+.SH SEE ALSO
+.BR cue_creator (1)
+
+.SH AUTHOR
+Written for HiFiBerry OS.
+
+.SH BUGS
+Report bugs to: https://github.com/hifiberry/hifiberry-os

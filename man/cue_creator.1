@@ -1,0 +1,186 @@
+.TH CUE_CREATOR 1 "February 2026" "HiFiBerry AutoRec 0.1.5" "User Commands"
+.SH NAME
+cue_creator \- find song boundaries in vinyl recordings and generate CUE sheets
+.SH SYNOPSIS
+.B cue_creator
+[\fIOPTIONS\fR] \fIWAV_FILE\fR
+.br
+.B cue_creator
+\-\-directory \fIDIRECTORY\fR
+.SH DESCRIPTION
+.B boundary_finder
+analyzes vinyl recordings to detect song boundaries and automatically generates 
+CUE sheet files. It uses a sophisticated three-pass algorithm designed specifically 
+for vinyl characteristics:
+.br
+1. Compute RMS levels across the entire recording
+.br
+2. Detect groove-in (music start) and groove-out (music end)
+.br
+3. Find song boundaries (valleys) within the music region
+
+The tool integrates with MusicBrainz to automatically identify releases and 
+use guided detection when matches are found. For recordings without matches, 
+it falls back to autonomous valley-based detection.
+
+.SH OPTIONS
+.TP
+.BR \-\-directory " " \fIDIRECTORY\fR
+Process all WAV files in the specified directory. Skips files that already 
+have .cue or .guess.cue files.
+
+.TP
+.BR \-\-chunk " " \fISECONDS\fR
+RMS analysis chunk size in seconds (default: 0.1).
+
+.TP
+.BR \-\-smooth " " \fICHUNKS\fR
+Smoothing window size in chunks (default: 30, ~3 seconds at 0.1s chunks).
+
+.TP
+.BR \-\-min\-prominence " " \fIDB\fR
+Minimum prominence for boundary detection in dB (default: 2.0).
+
+.TP
+.BR \-\-min\-song " " \fISECONDS\fR
+Minimum song duration in seconds (default: 20.0).
+
+.TP
+.BR \-\-no\-cue
+Disable CUE file generation (analysis only).
+
+.TP
+.BR \-\-dump
+Generate CSV dump of RMS values for visualization.
+
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output with detailed detection information.
+
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+
+.SH DETECTION MODES
+.TP
+.B Guided Detection (MusicBrainz-based)
+When a recording is matched with MusicBrainz (≤3% duration error), the tool 
+uses expected track positions to guide boundary detection. It searches within 
+±10 second windows around expected positions, making it robust to vinyl timing 
+variations while finding accurate boundaries.
+
+CUE files from guided detection use the \fI.cue\fR extension and include 
+verified track names from MusicBrainz.
+
+.TP
+.B Autonomous Detection (Valley-based)
+For unmatched recordings, the tool uses valley detection with prominence 
+analysis. It finds local minima in the RMS curve that represent pauses 
+between songs, filtering by:
+.br
+\- Prominence (depth below surrounding music)
+.br
+\- Score gap (relative prominence compared to nearby valleys)
+.br
+\- Minimum song duration
+
+CUE files from autonomous detection use the \fI.guess.cue\fR extension to 
+indicate that track information may be approximate.
+
+.SH VINYL CHARACTERISTICS
+The algorithm is optimized for vinyl recording characteristics:
+.br
+\- Groove-in: 0.5-5s of quiet before music starts
+.br
+\- Groove-out: Often minutes of silence after music ends
+.br
+\- Song boundaries: Brief energy dips, not true silence
+.br
+\- Continuous groove noise: Always present, never absolute silence
+
+.SH OUTPUT FILES
+.TP
+.I *.cue
+CUE sheet files for MusicBrainz-matched recordings. These contain verified 
+track information and accurate timing.
+
+.TP
+.I *.guess.cue
+CUE sheet files for autonomous detection. Track names are generic 
+("Track 1", "Track 2", etc.) and boundaries are algorithm-detected.
+
+.TP
+.I *_rms.csv
+RMS dump files (with \-\-dump option) containing timestamped RMS values 
+for external analysis and visualization.
+
+.SH EXAMPLES
+.TP
+Analyze single file:
+.B cue_creator vinyl_side_a.wav
+
+.TP
+Process entire directory:
+.B cue_creator \-\-directory /music/vinyl_recordings
+
+.TP
+Custom detection parameters:
+.B cue_creator \-\-min\-prominence 3.0 \-\-min\-song 30 recording.wav
+
+.TP
+Analysis only (no CUE generation):
+.B cue_creator \-\-no\-cue \-\-verbose recording.wav
+
+.TP
+Generate visualization data:
+.B cue_creator \-\-dump \-\-verbose recording.wav
+
+.SH MUSICBRAINZ INTEGRATION
+The tool automatically searches MusicBrainz using the filename format:
+.br
+.I artist_album.side.wav
+
+Examples:
+.br
+kanonenfieber_soldatenschicksale.1.wav
+.br
+dj_shadow_endtroducing.3.wav
+
+The tool tries various artist/album splits and ranks results by duration 
+match. Recordings within 3% duration error use guided detection.
+
+.SH TROUBLESHOOTING
+.TP
+.B "No boundaries detected"
+Try lowering \-\-min\-prominence (default: 2.0 dB) or \-\-min\-song 
+(default: 20 seconds). Use \-\-verbose to see candidate valleys that 
+were filtered out.
+
+.TP
+.B "Too many boundaries"
+Increase \-\-min\-prominence to require deeper pauses, or increase 
+\-\-min\-song to filter out short segments.
+
+.TP
+.B "Boundaries slightly off"
+This is normal for vinyl - boundaries may be off by a few seconds due 
+to the challenge of detecting brief pauses. The ±10s guided detection 
+window accounts for this.
+
+.TP
+.B "Wrong MusicBrainz match"
+Check filename format. Try using more specific artist/album names or 
+manually edit the .cue file after generation.
+
+.SH SEE ALSO
+.BR autorecord (1)
+
+For detailed algorithm documentation, see:
+.br
+/usr/share/doc/hifiberry-autorec/CUE_CREATOR.md
+
+.SH AUTHOR
+Written for HiFiBerry OS.
+
+.SH BUGS
+Report bugs to: https://github.com/hifiberry/hifiberry-os

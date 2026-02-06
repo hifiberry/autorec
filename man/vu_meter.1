@@ -1,0 +1,111 @@
+.TH VU_METER 1 "February 2026" "HiFiBerry AutoRec 0.1.4" "User Commands"
+.SH NAME
+vu_meter \- real-time audio level monitoring
+.SH SYNOPSIS
+.B vu_meter
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B vu_meter
+is a terminal-based VU (Volume Unit) meter that displays real-time audio 
+levels from PipeWire sources. It provides visual feedback of audio levels 
+with configurable update rates and display modes.
+
+Useful for monitoring recording levels, checking audio sources, and 
+verifying proper gain staging before recording.
+
+.SH OPTIONS
+.TP
+.BR \-s ", " \-\-source " " \fISOURCE\fR
+Specify the audio source to monitor. Can be a PipeWire source name 
+or numeric ID. If not specified, an interactive selection menu is shown.
+
+.TP
+.BR \-f ", " \-\-format " " \fIFORMAT\fR
+Audio format: s16 (16-bit) or s32 (32-bit, default).
+
+.TP
+.BR \-r ", " \-\-rate " " \fIRATE\fR
+Sample rate in Hz (default: 48000). Higher rates provide more responsive 
+metering but use more CPU.
+
+.TP
+.BR \-\-update\-rate " " \fIHZ\fR
+Display update rate in Hz (default: 10). Higher values provide smoother 
+updates but use more CPU.
+
+.TP
+.BR \-\-peak\-hold " " \fISECONDS\fR
+Duration to hold peak indicators in seconds (default: 1.0).
+
+.TP
+.BR \-\-mono
+Display mono (summed) levels instead of separate channels.
+
+.TP
+.BR \-\-compact
+Use compact display mode (single line per channel).
+
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output with detailed level information.
+
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+
+.SH DISPLAY
+The VU meter shows:
+.br
+\- Current RMS level in dB
+.br
+\- Peak level indicators
+.br
+\- Visual bar graph representation
+.br
+\- Channel labels (L/R for stereo)
+
+Level colors (if terminal supports):
+.br
+\- Green: Normal levels (-60 to -20 dB)
+.br
+\- Yellow: Approaching peak (-20 to -6 dB)
+.br
+\- Red: Near clipping (-6 to 0 dB)
+
+.SH EXAMPLES
+.TP
+Monitor default source:
+.B vu_meter
+
+.TP
+Monitor specific source with high update rate:
+.B vu_meter \-\-source "AT-LP5X Analog Stereo" \-\-update\-rate 30
+
+.TP
+Compact mono display:
+.B vu_meter \-\-mono \-\-compact
+
+.TP
+High-resolution monitoring:
+.B vu_meter \-\-rate 96000 \-\-format s32
+
+.SH KEYBOARD CONTROLS
+.TP
+.B q, ESC
+Quit the program
+.TP
+.B r
+Reset peak indicators
+.TP
+.B +/-
+Increase/decrease update rate
+
+.SH SEE ALSO
+.BR autorecord (1),
+.BR pause_analyzer (1)
+
+.SH AUTHOR
+Written for HiFiBerry OS.
+
+.SH BUGS
+Report bugs to: https://github.com/hifiberry/hifiberry-os

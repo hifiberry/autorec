@@ -55,3 +55,7 @@ path = "src/bin/strategy_compare.rs"
 [[bin]]
 name = "guided_detect"
 path = "src/bin/guided_detect.rs"
+
+[[bin]]
+name = "cue_creator"
+path = "src/bin/cue_creator.rs"

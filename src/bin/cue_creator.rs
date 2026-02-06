@@ -14,126 +14,19 @@
 
 use autorec::SampleFormat;
 use autorec::musicbrainz;
+use autorec::cuefile::{self, Valley};
+use autorec::wavfile;
+use autorec::audio_analysis;
 use std::env;
 use std::fs::{File, self};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process;
-
-#[derive(Debug)]
-struct WavHeader {
-    sample_rate: u32,
-    num_channels: u16,
-    bits_per_sample: u16,
-    data_size: u32,
-}
-
-fn read_wav_header(file: &mut BufReader<File>) -> Result<WavHeader, String> {
-    let mut buf = [0u8; 44];
-    file.read_exact(&mut buf).map_err(|e| format!("Failed to read WAV header: {}", e))?;
-    
-    if &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" || &buf[12..16] != b"fmt " {
-        return Err("Not a valid WAV file".to_string());
-    }
-    
-    let num_channels = u16::from_le_bytes([buf[22], buf[23]]);
-    let sample_rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
-    let bits_per_sample = u16::from_le_bytes([buf[34], buf[35]]);
-    
-    file.seek(SeekFrom::Start(36)).map_err(|e| format!("Seek error: {}", e))?;
-    
-    loop {
-        let mut chunk_header = [0u8; 8];
-        if file.read_exact(&mut chunk_header).is_err() {
-            return Err("Could not find data chunk".to_string());
-        }
-        
-        let chunk_size = u32::from_le_bytes([chunk_header[4], chunk_header[5], chunk_header[6], chunk_header[7]]);
-        
-        if &chunk_header[0..4] == b"data" {
-            return Ok(WavHeader {
-                sample_rate,
-                num_channels,
-                bits_per_sample,
-                data_size: chunk_size,
-            });
-        }
-        
-        file.seek(SeekFrom::Current(chunk_size as i64)).map_err(|e| format!("Seek error: {}", e))?;
-    }
-}
 
 fn format_timestamp(seconds: f64) -> String {
     let mins = (seconds / 60.0) as u32;
     let secs = seconds % 60.0;
     format!("{:02}:{:05.2}", mins, secs)
-}
-
-/// Represents a detected valley (potential song boundary)
-#[derive(Debug, Clone)]
-struct Valley {
-    position_seconds: f64,
-    depth_db: f32,          // RMS at the minimum point
-    prominence_db: f32,     // How much deeper than surrounding average
-    left_level_db: f32,     // Average RMS of audio before the valley
-    right_level_db: f32,    // Average RMS of audio after the valley
-    width_seconds: f64,     // Duration of the energy dip
-    score: f64,             // Combined score for ranking
-}
-
-/// Compute RMS in dB for a chunk of samples
-fn compute_rms_db(audio: &[Vec<i32>], format: SampleFormat) -> f32 {
-    let num_channels = audio.len();
-    let num_samples = audio[0].len();
-    
-    if num_samples == 0 {
-        return -80.0;
-    }
-    
-    let max_value = match format {
-        SampleFormat::S16 => 32768.0_f32,
-        SampleFormat::S32 => 2147483648.0_f32,
-    };
-    
-    let mut sum_squares = 0.0_f64;
-    for i in 0..num_samples {
-        let mut sample_sum = 0.0_f32;
-        for channel in audio {
-            sample_sum += channel[i] as f32 / max_value;
-        }
-        let mono_sample = sample_sum / num_channels as f32;
-        sum_squares += (mono_sample * mono_sample) as f64;
-    }
-    
-    let rms = (sum_squares / num_samples as f64).sqrt() as f32;
-    
-    if rms > 0.0 {
-        20.0 * rms.log10()
-    } else {
-        -80.0
-    }
-}
-
-/// Apply a moving average smoothing filter (in linear domain, not dB)
-fn smooth_rms(rms_values: &[f32], window_size: usize) -> Vec<f32> {
-    let half = window_size / 2;
-    let len = rms_values.len();
-    let mut smoothed = Vec::with_capacity(len);
-    
-    let linear: Vec<f64> = rms_values.iter()
-        .map(|&db| 10.0_f64.powf(db as f64 / 20.0))
-        .collect();
-    
-    for i in 0..len {
-        let start = if i > half { i - half } else { 0 };
-        let end = (i + half + 1).min(len);
-        let sum: f64 = linear[start..end].iter().sum();
-        let avg = sum / (end - start) as f64;
-        let db = if avg > 0.0 { 20.0 * avg.log10() } else { -80.0 };
-        smoothed.push(db as f32);
-    }
-    
-    smoothed
 }
 
 /// Detect the groove-in point (where music starts).
@@ -231,32 +124,6 @@ fn detect_groove_out(
     file_duration
 }
 
-/// Estimate noise floor: 5th-10th percentile of smoothed RMS
-fn estimate_noise_floor(smoothed: &[f32]) -> f32 {
-    let mut sorted = smoothed.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p5 = (sorted.len() as f64 * 0.05) as usize;
-    let p10 = (sorted.len() as f64 * 0.10) as usize;
-    if p10 > p5 {
-        sorted[p5..=p10].iter().sum::<f32>() / (p10 - p5 + 1) as f32
-    } else {
-        sorted[p5.min(sorted.len() - 1)]
-    }
-}
-
-/// Estimate music level: 60th-80th percentile of smoothed RMS
-fn estimate_music_level(smoothed: &[f32]) -> f32 {
-    let mut sorted = smoothed.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p60 = (sorted.len() as f64 * 0.60) as usize;
-    let p80 = (sorted.len() as f64 * 0.80) as usize;
-    if p80 > p60 {
-        sorted[p60..=p80].iter().sum::<f32>() / (p80 - p60 + 1) as f32
-    } else {
-        sorted[p60.min(sorted.len() - 1)]
-    }
-}
-
 /// Find song boundaries within the music region.
 ///
 /// Algorithm:
@@ -287,7 +154,7 @@ fn find_song_boundaries(
     
     // Long smoothing for reference level (30 seconds)
     let long_window = (30.0 / chunk_duration) as usize;
-    let long_smoothed = smooth_rms(rms_values, long_window.max(3));
+    let long_smoothed = audio_analysis::smooth_rms(rms_values, long_window.max(3));
     
     // Context window: 15 seconds on each side
     let context_chunks = (15.0 / chunk_duration) as usize;
@@ -475,78 +342,32 @@ fn find_song_boundaries(
     filtered
 }
 
-fn generate_cue_file(
-    wav_file: &str,
-    artist: &str,
-    title: &str,
-    track_names: &[String],
-    groove_in: f64,
-    boundaries: &[Valley],
-) -> String {
-    let wav_filename = Path::new(wav_file)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown.wav");
-    
-    let mut cue = String::new();
-    cue.push_str(&format!("REM GENERATOR \"HiFiBerry AutoRec boundary_finder\"\n"));
-    cue.push_str(&format!("PERFORMER \"{}\"\n", artist));
-    cue.push_str(&format!("TITLE \"{}\"\n", title));
-    cue.push_str(&format!("FILE \"{}\" WAVE\n", wav_filename));
-    
-    let mut track_positions = vec![groove_in];
-    for b in boundaries {
-        track_positions.push(b.position_seconds);
-    }
-    
-    for (i, &pos) in track_positions.iter().enumerate() {
-        let track_num = i + 1;
-        let default_name = format!("Track {}", track_num);
-        let track_name = track_names.get(i)
-            .map(|n| n.as_str())
-            .unwrap_or(&default_name);
-        
-        // Remove track number prefix if present (e.g., "#1 Song" -> "Song")
-        let prefix = format!("#{} ", track_num);
-        let clean_name = if let Some(stripped) = track_name.strip_prefix(&prefix) {
-            stripped
-        } else {
-            track_name
-        };
-        
-        cue.push_str(&format!("  TRACK {:02} AUDIO\n", track_num));
-        cue.push_str(&format!("    TITLE \"{}\"\n", clean_name));
-        cue.push_str(&format!("    PERFORMER \"{}\"\n", artist));
-        
-        // Convert position to MM:SS:FF (frames, 75 per second)
-        let minutes = (pos / 60.0) as u32;
-        let seconds = (pos % 60.0) as u32;
-        let frames = ((pos % 1.0) * 75.0) as u32;
-        cue.push_str(&format!("    INDEX 01 {:02}:{:02}:{:02}\n", minutes, seconds, frames));
-    }
-    
-    cue
-}
-
-fn write_cue_file(wav_file: &str, cue_content: &str) -> Result<PathBuf, std::io::Error> {
-    let cue_path = Path::new(wav_file).with_extension("cue");
-    let mut file = File::create(&cue_path)?;
-    file.write_all(cue_content.as_bytes())?;
-    Ok(cue_path)
-}
-
-fn has_cue_file(wav_file: &str) -> bool {
-    Path::new(wav_file).with_extension("cue").exists()
-}
-
-fn collect_wav_files(directory: &str) -> Vec<PathBuf> {
+fn collect_wav_files(directory: &str, recursive: bool) -> Vec<PathBuf> {
     let mut wav_files = Vec::new();
     
-    if let Ok(entries) = fs::read_dir(directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("wav") {
-                wav_files.push(path);
+    if recursive {
+        // Recursive traversal
+        fn visit_dirs(dir: &Path, wav_files: &mut Vec<PathBuf>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        visit_dirs(&path, wav_files);
+                    } else if path.extension().and_then(|s| s.to_str()) == Some("wav") {
+                        wav_files.push(path);
+                    }
+                }
+            }
+        }
+        visit_dirs(Path::new(directory), &mut wav_files);
+    } else {
+        // Non-recursive: only current directory
+        if let Ok(entries) = fs::read_dir(directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("wav") {
+                    wav_files.push(path);
+                }
             }
         }
     }
@@ -642,6 +463,7 @@ fn main() {
     let dump = args.iter().any(|a| a == "--dump");
     let no_lookup = args.iter().any(|a| a == "--no-lookup");
     let no_cue = args.iter().any(|a| a == "--no-cue");
+    let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
     
     let directory = args.iter()
         .position(|a| a == "--directory" || a == "-d")
@@ -676,16 +498,18 @@ fn main() {
     
     // Collect file arguments or process directory
     let mut wav_files_owned: Vec<PathBuf> = Vec::new();
+    let mut is_directory_mode = false;
     
     if let Some(dir) = directory {
-        // Directory mode
-        wav_files_owned = collect_wav_files(dir);
+        // Explicit directory mode with --directory flag
+        wav_files_owned = collect_wav_files(dir, recursive);
+        is_directory_mode = true;
         if wav_files_owned.is_empty() {
             eprintln!("No WAV files found in directory: {}", dir);
             process::exit(1);
         }
     } else {
-        // Individual file mode
+        // Individual file mode - check if first argument is a directory
         let file_args: Vec<&str> = args.iter()
             .skip(1)
             .filter(|a| !a.starts_with("--") && !a.starts_with("-"))
@@ -702,7 +526,22 @@ fn main() {
             .map(|s| s.as_str())
             .collect();
         
-        wav_files_owned = file_args.iter().map(|s| PathBuf::from(s)).collect();
+        // Check if first argument is a directory
+        if !file_args.is_empty() {
+            let first_path = Path::new(file_args[0]);
+            if first_path.is_dir() {
+                // Automatically treat as directory mode
+                wav_files_owned = collect_wav_files(file_args[0], recursive);
+                is_directory_mode = true;
+                if wav_files_owned.is_empty() {
+                    eprintln!("No WAV files found in directory: {}", file_args[0]);
+                    process::exit(1);
+                }
+            } else {
+                // Regular file mode
+                wav_files_owned = file_args.iter().map(|s| PathBuf::from(s)).collect();
+            }
+        }
     }
     
     let wav_files: Vec<&str> = wav_files_owned.iter()
@@ -717,12 +556,14 @@ fn main() {
         println!("Automatically detects groove-in/groove-out and finds song transitions.");
         println!("Optionally looks up track names from MusicBrainz based on filename.");
         println!();
-        println!("Usage: boundary_finder [OPTIONS] <FILE1.wav> [FILE2.wav ...]");
-        println!("       boundary_finder [OPTIONS] --directory <DIR>");
+        println!("Usage: cue_creator [OPTIONS] <FILE1.wav> [FILE2.wav ...]");
+        println!("       cue_creator [OPTIONS] <DIRECTORY>");
+        println!("       cue_creator [OPTIONS] --directory <DIR>");
         println!();
         println!("Options:");
         println!("  --verbose, -v            Show detailed analysis");
         println!("  --directory <DIR>, -d    Process all WAV files in directory");
+        println!("  --recursive, -r          Process subdirectories recursively");
         println!("  --dump                   Dump RMS curve (tab-separated, for plotting)");
         println!("  --no-lookup              Skip MusicBrainz release lookup");
         println!("  --no-cue                 Don't generate CUE files");
@@ -732,22 +573,26 @@ fn main() {
         println!("  --chunk-ms <MS>          RMS window size in milliseconds (default: 200)");
         println!();
         println!("Examples:");
-        println!("  boundary_finder --verbose side_a.wav side_b.wav");
-        println!("  boundary_finder --directory /music/at33ptg");
+        println!("  cue_creator --verbose side_a.wav side_b.wav");
+        println!("  cue_creator /music/at33ptg");
+        println!("  cue_creator --directory /music/at33ptg");
+        println!("  cue_creator --recursive /music");
         println!();
         println!("Directory Mode:");
+        println!("  - Automatically activated when argument is a directory");
         println!("  - Processes all .wav files in the specified directory");
-        println!("  - Skips files that already have .cue files");
+        println!("  - Use --recursive to include subdirectories");
+        println!("  - Skips files that already have .cue or .guess.cue files");
         println!("  - Creates .cue files with detected boundaries and track info");
         process::exit(1);
     }
     
     // Directory mode: filter out files that already have .cue files
-    let files_to_process: Vec<&str> = if directory.is_some() && !no_cue {
+    let files_to_process: Vec<&str> = if is_directory_mode && !no_cue {
         let mut skipped = 0;
         let filtered: Vec<&str> = wav_files.iter()
             .filter(|f| {
-                if has_cue_file(f) {
+                if cuefile::has_cue_file(f) {
                     skipped += 1;
                     false
                 } else {
@@ -803,9 +648,30 @@ fn process_file(
     println!("File: {}", wav_file);
     println!();
     
-    let file = File::open(wav_file).unwrap();
+    // Check if the path is a directory
+    let path = Path::new(wav_file);
+    if path.is_dir() {
+        eprintln!("Error: '{}' is a directory.", wav_file);
+        eprintln!("Use --directory to process all WAV files in a directory:");
+        eprintln!("  cue_creator --directory {}", wav_file);
+        process::exit(1);
+    }
+    
+    let file = match File::open(wav_file) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error: Cannot open file '{}': {}", wav_file, e);
+            process::exit(1);
+        }
+    };
     let mut reader = BufReader::new(file);
-    let header = read_wav_header(&mut reader).unwrap();
+    let header = match wavfile::read_wav_header(&mut reader) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Error: Invalid WAV file '{}': {}", wav_file, e);
+            process::exit(1);
+        }
+    };
     
     let bytes_per_sample = (header.bits_per_sample / 8) as usize;
     let file_duration = header.data_size as f64
@@ -865,7 +731,7 @@ fn process_file(
             }
         }
         
-        rms_values.push(compute_rms_db(&audio_data, format));
+        rms_values.push(audio_analysis::compute_rms_db(&audio_data, format));
         timestamps.push(position);
         position += chunk_duration;
     }
@@ -876,11 +742,11 @@ fn process_file(
     
     // ==== Smoothing ====
     let smooth_window = ((smooth_window_secs / chunk_duration) as usize).max(3) | 1;
-    let smoothed = smooth_rms(&rms_values, smooth_window);
+    let smoothed = audio_analysis::smooth_rms(&rms_values, smooth_window);
     
     // ==== Level estimates ====
-    let noise_floor = estimate_noise_floor(&smoothed);
-    let music_level = estimate_music_level(&smoothed);
+    let noise_floor = audio_analysis::estimate_noise_floor(&smoothed);
+    let music_level = audio_analysis::estimate_music_level(&smoothed);
     
     println!("Levels:");
     println!("  Noise floor: {:.1} dB (groove noise)", noise_floor);
@@ -1068,14 +934,43 @@ fn process_file(
             })
             .unwrap_or("Unknown Album");
         
-        let cue_content = generate_cue_file(wav_file, artist, title, &track_names, groove_in, &valleys);
+        let cue_content = cuefile::generate_cue_file(wav_file, artist, title, &track_names, groove_in, &valleys);
         
-        match write_cue_file(wav_file, &cue_content) {
+        // Use .cue for MusicBrainz matched, .guess.cue otherwise
+        let has_mb_match = mb_info.is_some();
+        
+        match cuefile::write_cue_file(wav_file, &cue_content, has_mb_match) {
             Ok(cue_path) => {
                 println!("CUE file created: {}", cue_path.display());
             }
             Err(e) => {
                 eprintln!("Warning: Failed to write CUE file: {}", e);
+            }
+        }
+        
+        // Generate info file with timing details
+        let expected_track_data: Option<Vec<(f64, f64)>> = mb_tracks.as_ref().map(|tracks| {
+            tracks.iter()
+                .map(|t| (t.expected_start, t.length_seconds))
+                .collect()
+        });
+        
+        let info_content = cuefile::generate_info_file(
+            wav_file,
+            groove_in,
+            groove_out,
+            &valleys,
+            &track_names,
+            expected_track_data.as_deref(),
+            mb_info.as_deref(),
+        );
+        
+        match cuefile::write_info_file(wav_file, &info_content, has_mb_match) {
+            Ok(info_path) => {
+                println!("Info file created: {}", info_path.display());
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to write info file: {}", e);
             }
         }
     }}
