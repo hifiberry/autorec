@@ -1,0 +1,3 @@
+[submodule "shazamio-core"]
+	path = shazamio-core
+	url = https://github.com/shazamio/shazamio-core.git

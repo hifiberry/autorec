@@ -119,7 +119,7 @@ pub trait AudioInputStream: AudioStream {
 
 /// Native PipeWire audio input stream using the Rust pipewire crate
 pub struct PipeWireInputStream {
-    target: String,
+    _target: String,
     rate: u32,
     channels: usize,
     format: SampleFormat,
@@ -133,7 +133,7 @@ impl PipeWireInputStream {
     /// Create a new native PipeWire input stream
     pub fn new(target: String, rate: u32, channels: usize, format: SampleFormat) -> Result<Self, String> {
         Ok(PipeWireInputStream {
-            target,
+            _target: target,
             rate,
             channels,
             format,
@@ -205,7 +205,7 @@ impl AudioInputStream for PipeWireInputStream {
         
         // Reset quit flag
         self.quit_flag.store(false, Ordering::Relaxed);
-        let quit_flag_thread = self.quit_flag.clone();
+        let _quit_flag_thread = self.quit_flag.clone();
         
         // Spawn thread to run PipeWire mainloop
         let thread_handle = thread::spawn(move || {

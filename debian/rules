@@ -4,11 +4,12 @@
 	dh $@
 
 override_dh_auto_build:
-	cargo build --release --bin autorecord --bin vu_meter
+	cargo build --release --bin autorecord --bin vu_meter --bin pause_analyzer
 
 override_dh_auto_install:
 	install -D -m 0755 target/release/autorecord debian/hifiberry-autorec/usr/bin/autorecord
 	install -D -m 0755 target/release/vu_meter debian/hifiberry-autorec/usr/bin/vu_meter
+	install -D -m 0755 target/release/pause_analyzer debian/hifiberry-autorec/usr/bin/pause_analyzer
 
 override_dh_auto_test:
 	# Skip tests
