@@ -1,7 +1,9 @@
 pub mod audio_stream;
 pub mod config;
 pub mod decibel;
+pub mod detection_strategies;
 pub mod display;
+pub mod musicbrainz;
 pub mod pause_detector;
 pub mod pipewire_utils;
 pub mod recorder;

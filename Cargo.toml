@@ -47,3 +47,11 @@ path = "src/bin/test_pipewire.rs"
 [[bin]]
 name = "pause_analyzer"
 path = "src/bin/pause_analyzer.rs"
+
+[[bin]]
+name = "strategy_compare"
+path = "src/bin/strategy_compare.rs"
+
+[[bin]]
+name = "guided_detect"
+path = "src/bin/guided_detect.rs"
