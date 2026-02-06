@@ -1,4 +1,4 @@
-use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AudioRecorder, SampleFormat, VUMeter};
+use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AudioRecorder, Config, SampleFormat, VUMeter};
 use std::env;
 use std::process;
 use std::thread;
@@ -19,6 +19,8 @@ fn print_usage() {
     println!("Options:");
     println!("  --list-targets           List available PipeWire recording targets and exit");
     println!("  --show-defaults          Show default configuration values and exit");
+    println!("  --show-saved-defaults    Show saved default configuration from file and exit");
+    println!("  --save-defaults          Save current command-line options as defaults");
     println!("  --source <SOURCE>        Audio source address:");
     println!("                             pipewire:device or pw:device");
     println!("                             alsa:hw:0,0 or alsa:default");
@@ -40,30 +42,63 @@ fn print_usage() {
     println!("  --no-keyboard            Disable keyboard shortcuts (no raw mode)");
     println!("  --help                   Show this help message");
     println!();
+    println!("Configuration:");
+    println!("  Defaults can be saved to ~/.state/autorec/defaults.toml using --save-defaults.");
+    println!("  Saved defaults override built-in defaults, and command-line options override both.");
+    println!();
     println!("Examples:");
     println!("  record vinyl --source pipewire:riaa.monitor");
     println!("  record tape --source alsa:hw:1,0 --rate 48000");
     println!("  record test --source /path/to/source.flac");
+    println!("  record --source alsa:hw:1,0 --rate 48000 --save-defaults  # Save as defaults");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Default values
+    // Load saved defaults from config file if available
+    let saved_config = Config::load().unwrap_or_else(|_| Config::new());
+
+    // Built-in default values
+    let builtin_defaults = Config {
+        source: None,
+        rate: Some(96000),
+        channels: Some(2),
+        format: Some("s32".to_string()),
+        interval: Some(0.2),
+        db_range: Some(90.0),
+        max_db: Some(0.0),
+        off_threshold: Some(-60.0),
+        silence_duration: Some(10.0),
+        min_length: Some(600.0),
+        no_vumeter: Some(false),
+        no_keyboard: Some(false),
+    };
+
+    // Start with built-in defaults, then apply saved config
+    let mut effective_config = builtin_defaults.clone();
+    effective_config.merge(&saved_config);
+
+    // Current values (will be updated by command-line args)
     let mut record_file = "recording".to_string();
-    let mut source: Option<String> = None;
-    let mut rate = 96000;
-    let mut channels = 2;
-    let mut format = SampleFormat::S32;
-    let mut interval = 0.2;
-    let mut db_range = 90.0;
-    let mut max_db = 0.0;
-    let mut off_threshold = -60.0;
-    let mut silence_duration = 10.0;
-    let mut min_length = 600.0;
-    let mut no_vumeter = false;
-    let mut no_keyboard = false;
+    let mut source: Option<String> = effective_config.source.clone();
+    let mut rate = effective_config.rate.unwrap_or(96000);
+    let mut channels = effective_config.channels.unwrap_or(2);
+    let mut format = SampleFormat::from_str(&effective_config.format.clone().unwrap_or_else(|| "s32".to_string()))
+        .unwrap_or(SampleFormat::S32);
+    let mut interval = effective_config.interval.unwrap_or(0.2);
+    let mut db_range = effective_config.db_range.unwrap_or(90.0);
+    let mut max_db = effective_config.max_db.unwrap_or(0.0);
+    let mut off_threshold = effective_config.off_threshold.unwrap_or(-60.0);
+    let mut silence_duration = effective_config.silence_duration.unwrap_or(10.0);
+    let mut min_length = effective_config.min_length.unwrap_or(600.0);
+    let mut no_vumeter = effective_config.no_vumeter.unwrap_or(false);
+    let mut no_keyboard = effective_config.no_keyboard.unwrap_or(false);
     let mut duration: Option<f64> = None;
+
+    // Track which options were explicitly set on command line
+    let mut cmdline_config = Config::new();
+    let mut save_defaults = false;
 
     let mut i = 1;
     let mut positional_args = Vec::new();
@@ -74,7 +109,8 @@ fn main() {
                 process::exit(list_targets());
             }
             "--show-defaults" => {
-                println!("Default settings:");
+                println!("Built-in default settings:");
+                println!();
                 
                 // Auto-detect the default source
                 let (selected_target, error_code) = validate_and_select_target(None, false);
@@ -98,71 +134,101 @@ fn main() {
                 println!("  Keyboard shortcuts: enabled");
                 process::exit(0);
             }
+            "--show-saved-defaults" => {
+                if let Ok(config_path) = Config::get_config_path() {
+                    if config_path.exists() {
+                        println!("Saved defaults from {:?}:", config_path);
+                        println!();
+                        saved_config.print("Configuration");
+                    } else {
+                        println!("No saved defaults file found at {:?}", config_path);
+                        println!("Use --save-defaults to create one.");
+                    }
+                } else {
+                    println!("Could not determine config file path");
+                }
+                process::exit(0);
+            }
+            "--save-defaults" => {
+                save_defaults = true;
+            }
             "--source" | "--target" => {
                 if i + 1 < args.len() {
                     source = Some(args[i + 1].clone());
+                    cmdline_config.source = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
             "--rate" => {
                 if i + 1 < args.len() {
                     rate = args[i + 1].parse().unwrap_or(96000);
+                    cmdline_config.rate = Some(rate);
                     i += 1;
                 }
             }
             "--channels" => {
                 if i + 1 < args.len() {
                     channels = args[i + 1].parse().unwrap_or(2);
+                    cmdline_config.channels = Some(channels);
                     i += 1;
                 }
             }
             "--format" => {
                 if i + 1 < args.len() {
                     format = SampleFormat::from_str(&args[i + 1]).unwrap_or(SampleFormat::S32);
+                    cmdline_config.format = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
             "--interval" => {
                 if i + 1 < args.len() {
                     interval = args[i + 1].parse().unwrap_or(0.2);
+                    cmdline_config.interval = Some(interval);
                     i += 1;
                 }
             }
             "--db-range" => {
                 if i + 1 < args.len() {
                     db_range = args[i + 1].parse().unwrap_or(90.0);
+                    cmdline_config.db_range = Some(db_range);
                     i += 1;
                 }
             }
             "--max-db" => {
                 if i + 1 < args.len() {
                     max_db = args[i + 1].parse().unwrap_or(0.0);
+                    cmdline_config.max_db = Some(max_db);
                     i += 1;
                 }
             }
             "--off-threshold" => {
                 if i + 1 < args.len() {
                     off_threshold = args[i + 1].parse().unwrap_or(-60.0);
+                    cmdline_config.off_threshold = Some(off_threshold);
                     i += 1;
                 }
             }
             "--silence-duration" => {
                 if i + 1 < args.len() {
                     silence_duration = args[i + 1].parse().unwrap_or(10.0);
+                    cmdline_config.silence_duration = Some(silence_duration);
                     i += 1;
                 }
             }
             "--min-length" => {
                 if i + 1 < args.len() {
                     min_length = args[i + 1].parse().unwrap_or(600.0);
+                    cmdline_config.min_length = Some(min_length);
                     i += 1;
                 }
             }
             "--no-vumeter" => {
                 no_vumeter = true;
+                cmdline_config.no_vumeter = Some(true);
             }
             "--no-keyboard" => {
                 no_keyboard = true;
+                cmdline_config.no_keyboard = Some(true);
             }
             "--duration" => {
                 if i + 1 < args.len() {
@@ -185,6 +251,28 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    // Save defaults if requested
+    if save_defaults {
+        // Merge command-line config with saved config
+        let mut config_to_save = saved_config.clone();
+        config_to_save.merge(&cmdline_config);
+        
+        match config_to_save.save() {
+            Ok(_) => {
+                if let Ok(config_path) = Config::get_config_path() {
+                    println!("Defaults saved to {:?}", config_path);
+                    println!();
+                    config_to_save.print("Saved configuration");
+                }
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error saving defaults: {}", e);
+                process::exit(1);
+            }
+        }
     }
 
     // Get filename from positional args

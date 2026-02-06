@@ -1,4 +1,5 @@
 pub mod audio_stream;
+pub mod config;
 pub mod decibel;
 pub mod display;
 pub mod pipewire_utils;
@@ -9,6 +10,7 @@ pub use audio_stream::{
     create_input_stream, parse_audio_address, AlsaInputStream, AudioInputStream, AudioStream,
     PipeWireInputStream,
 };
+pub use config::Config;
 pub use display::display_vu_meter;
 pub use pipewire_utils::{get_available_targets, list_targets, validate_and_select_target};
 pub use recorder::AudioRecorder;

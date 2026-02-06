@@ -1,3 +1,14 @@
+hifiberry-autorec (0.1.1) stable; urgency=medium
+
+  * Added configuration file support
+  * Defaults can now be saved to ~/.state/autorec/defaults.toml
+  * New --save-defaults option to save current settings
+  * New --show-saved-defaults option to view saved configuration
+  * Saved defaults override built-in defaults
+  * Command-line options override both saved and built-in defaults
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 06 Feb 2026 00:00:00 +0000
+
 hifiberry-autorec (0.1.0) stable; urgency=medium
 
   * Initial release
