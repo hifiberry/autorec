@@ -230,6 +230,10 @@ impl AudioRecorder {
         *self.recording.lock().unwrap()
     }
 
+    pub fn current_filename(&self) -> Option<String> {
+        self.current_file.lock().unwrap().clone()
+    }
+
     pub fn close(&mut self) {
         let is_recording = *self.recording.lock().unwrap();
         if is_recording {

@@ -386,11 +386,15 @@ fn main() {
                 if !no_vumeter {
                     // Display VU meter with recording status
                     let rec_status = if recorder.is_recording() {
-                        Some("[RECORDING]")
+                        if let Some(filename) = recorder.current_filename() {
+                            Some(format!("[RECORDING to {}]", filename))
+                        } else {
+                            Some("[RECORDING]".to_string())
+                        }
                     } else {
                         None
                     };
-                    display_vu_meter(&metrics, db_range, max_db, rec_status).ok();
+                    display_vu_meter(&metrics, db_range, max_db, rec_status.as_deref()).ok();
                 }
             }
             None => {
