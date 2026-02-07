@@ -463,7 +463,8 @@ fn main() {
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let dump = args.iter().any(|a| a == "--dump");
     let no_lookup = args.iter().any(|a| a == "--no-lookup");
-    let use_shazam = args.iter().any(|a| a == "--use-shazam" || a == "--shazam");
+    let use_musicbrainz = args.iter().any(|a| a == "--use-musicbrainz" || a == "--musicbrainz");
+    let use_shazam = !use_musicbrainz;  // Shazam is now the default
     let no_cue = args.iter().any(|a| a == "--no-cue");
     let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
     
@@ -567,8 +568,8 @@ fn main() {
         println!("  --directory <DIR>, -d    Process all WAV files in directory");
         println!("  --recursive, -r          Process subdirectories recursively");
         println!("  --dump                   Dump RMS curve (tab-separated, for plotting)");
-        println!("  --no-lookup              Skip MusicBrainz release lookup");
-        println!("  --use-shazam, --shazam   Use Shazam (via songrec) instead of MusicBrainz");
+        println!("  --no-lookup              Skip all metadata lookup");
+        println!("  --use-musicbrainz        Use MusicBrainz (filename-based) instead of Shazam");
         println!("  --no-cue                 Don't generate CUE files");
         println!("  --min-prominence <DB>    Minimum valley depth below local average (default: 3.0)");
         println!("  --min-song <SEC>         Minimum song duration in seconds (default: 30)");
