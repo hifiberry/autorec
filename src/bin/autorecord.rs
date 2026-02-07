@@ -42,6 +42,7 @@ fn print_usage() {
     println!("  --no-shazam              Disable song detection");
     println!("  --no-vumeter             Disable VU meter display (simple text output)");
     println!("  --no-keyboard            Disable keyboard shortcuts (no raw mode)");
+    println!("  --generate-cue           Generate CUE files for recorded tracks after exit");
     println!("  --help                   Show this help message");
     println!();
     println!("Configuration:");
@@ -99,6 +100,7 @@ fn main() {
     let mut duration: Option<f64> = None;
     let mut detect_interval: f64 = 180.0;  // Song detection every 3 minutes
     let mut no_shazam = false;
+    let mut generate_cue = false;
 
     // Track which options were explicitly set on command line
     let mut cmdline_config = Config::new();
@@ -235,6 +237,7 @@ fn main() {
                 cmdline_config.no_keyboard = Some(true);
             }
             "--no-shazam" => no_shazam = true,
+            "--generate-cue" => generate_cue = true,
             "--detect-interval" => {
                 if i + 1 < args.len() {
                     detect_interval = args[i + 1].parse().unwrap_or(180.0);
@@ -500,6 +503,37 @@ fn main() {
                 println!("\nRecording stopped.");
                 break;
             }
+        }
+    }
+
+    // Generate CUE files if requested
+    if generate_cue {
+        let recorded_files = recorder.get_recorded_files();
+        if !recorded_files.is_empty() {
+            println!("\nGenerating CUE files for {} recording(s)...", recorded_files.len());
+            for file in &recorded_files {
+                println!("  Processing: {}", file);
+                let output = process::Command::new("cue_creator")
+                    .arg(file)
+                    .output();
+                
+                match output {
+                    Ok(result) if result.status.success() => {
+                        println!("    ✓ CUE file generated");
+                    }
+                    Ok(result) => {
+                        eprintln!("    ✗ Failed to generate CUE file");
+                        if !result.stderr.is_empty() {
+                            eprintln!("      {}", String::from_utf8_lossy(&result.stderr));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("    ✗ Error running cue_creator: {}", e);
+                    }
+                }
+            }
+        } else {
+            println!("\nNo recordings were created, skipping CUE generation.");
         }
     }
 

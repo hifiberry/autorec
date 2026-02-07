@@ -27,6 +27,7 @@ pub struct AudioRecorder {
     current_file: Arc<Mutex<Option<String>>>,
     recording_start_time: Arc<Mutex<Option<Instant>>>,
     next_file_number: Arc<Mutex<usize>>,
+    recorded_files: Arc<Mutex<Vec<String>>>,
 
     sender: Sender<RecorderCommand>,
     thread_handle: Option<thread::JoinHandle<()>>,
@@ -58,6 +59,7 @@ impl AudioRecorder {
         let current_file = Arc::new(Mutex::new(None));
         let recording_start_time = Arc::new(Mutex::new(None));
         let next_file_number = Arc::new(Mutex::new(n));
+        let recorded_files = Arc::new(Mutex::new(Vec::new()));
 
         // Start recording thread
         let thread_handle = {
@@ -70,6 +72,7 @@ impl AudioRecorder {
             let current_file = Arc::clone(&current_file);
             let recording_start_time = Arc::clone(&recording_start_time);
             let next_file_number = Arc::clone(&next_file_number);
+            let recorded_files = Arc::clone(&recorded_files);
 
             thread::spawn(move || {
                 Self::recording_worker(
@@ -83,6 +86,7 @@ impl AudioRecorder {
                     current_file,
                     recording_start_time,
                     next_file_number,
+                    recorded_files,
                 );
             })
         };
@@ -97,6 +101,7 @@ impl AudioRecorder {
             current_file,
             recording_start_time,
             next_file_number,
+            recorded_files,
             sender,
             thread_handle: Some(thread_handle),
         }
@@ -122,6 +127,7 @@ impl AudioRecorder {
         current_file: Arc<Mutex<Option<String>>>,
         recording_start_time: Arc<Mutex<Option<Instant>>>,
         next_file_number: Arc<Mutex<usize>>,
+        recorded_files: Arc<Mutex<Vec<String>>>,
     ) {
         let mut wav_writer: Option<WavWriter> = None;
 
@@ -185,6 +191,8 @@ impl AudioRecorder {
                                 "\nStopped recording to {} (duration: {:.1}s)",
                                 filename, duration
                             );
+                            // Add to recorded files list
+                            recorded_files.lock().unwrap().push(filename.clone());
                             // Increment file number for next recording since this file was kept
                             let mut file_number = next_file_number.lock().unwrap();
                             *file_number += 1;
@@ -232,6 +240,10 @@ impl AudioRecorder {
 
     pub fn current_filename(&self) -> Option<String> {
         self.current_file.lock().unwrap().clone()
+    }
+
+    pub fn get_recorded_files(&self) -> Vec<String> {
+        self.recorded_files.lock().unwrap().clone()
     }
 
     pub fn close(&mut self) {
