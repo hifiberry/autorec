@@ -219,7 +219,7 @@ pub fn parse_recording_filename(path: &str) -> Option<(Vec<String>, u32)> {
 
 /// Search MusicBrainz for a release by artist and release name.
 /// Returns up to `limit` results sorted by score.
-fn search_release(artist: &str, release: &str, limit: u32) -> Result<Vec<SearchResult>, Box<dyn Error>> {
+pub fn search_release(artist: &str, release: &str, limit: u32) -> Result<Vec<SearchResult>, Box<dyn Error>> {
     // URL-encode the query by replacing spaces with +
     let artist_q = artist.replace(' ', "+");
     let release_q = release.replace(' ', "+");

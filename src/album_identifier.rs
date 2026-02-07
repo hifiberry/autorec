@@ -1,7 +1,74 @@
 use std::process::Command;
 use std::path::Path;
+use std::time::{Duration, Instant};
+use std::thread;
 use serde::{Deserialize, Serialize};
-use crate::wavfile::extract_wav_segment;
+use crate::wavfile::{extract_wav_segment, read_wav_header};
+
+/// Rate limiter for songrec API calls with adaptive backoff
+struct RateLimiter {
+    last_request: Option<Instant>,
+    current_interval: Duration,
+    base_interval: Duration,
+    max_interval: Duration,
+    success_count: u32,
+}
+
+impl RateLimiter {
+    fn new(min_interval_secs: u64) -> Self {
+        let base = Duration::from_secs(min_interval_secs);
+        RateLimiter {
+            last_request: None,
+            current_interval: base,
+            base_interval: base,
+            max_interval: Duration::from_secs(min_interval_secs * 16), // Max 16x base
+            success_count: 0,
+        }
+    }
+    
+    fn wait_if_needed(&mut self) {
+        if let Some(last) = self.last_request {
+            let elapsed = last.elapsed();
+            if elapsed < self.current_interval {
+                let wait_time = self.current_interval - elapsed;
+                println!("  Rate limiting: waiting {:.1}s before next request...", wait_time.as_secs_f64());
+                thread::sleep(wait_time);
+            }
+        }
+        self.last_request = Some(Instant::now());
+    }
+    
+    fn report_success(&mut self) {
+        self.success_count += 1;
+        
+        // After 10 successful requests, try reducing the interval
+        if self.success_count >= 10 && self.current_interval > self.base_interval {
+            let new_interval = self.current_interval / 2;
+            if new_interval >= self.base_interval {
+                self.current_interval = new_interval;
+                println!("  Rate limit reduced to {:.1}s after {} successful requests", 
+                         self.current_interval.as_secs_f64(), self.success_count);
+            } else {
+                self.current_interval = self.base_interval;
+                println!("  Rate limit restored to {:.1}s after {} successful requests", 
+                         self.current_interval.as_secs_f64(), self.success_count);
+            }
+            self.success_count = 0;
+        }
+    }
+    
+    fn report_failure(&mut self) {
+        let new_interval = self.current_interval * 2;
+        if new_interval <= self.max_interval {
+            self.current_interval = new_interval;
+        } else {
+            self.current_interval = self.max_interval;
+        }
+        println!("  Rate limit increased to {:.1}s due to API error", 
+                 self.current_interval.as_secs_f64());
+        self.success_count = 0; // Reset success counter on failure
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentifiedSong {
@@ -15,38 +82,55 @@ pub struct IdentifiedSong {
 pub struct AlbumInfo {
     pub album_title: String,
     pub album_artist: String,
+    pub album_candidates: Vec<String>,
     pub songs: Vec<IdentifiedSong>,
     pub confidence: f64,
+    #[serde(skip)]
+    pub log: String,
+}
+
+/// Result from song identification including log
+pub struct IdentificationResult {
+    pub songs: Vec<IdentifiedSong>,
+    pub log: String,
 }
 
 /// Identify songs at specific timestamps in a WAV file using songrec
-pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Result<Vec<IdentifiedSong>, String> {
+pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Result<IdentificationResult, String> {
     let path = Path::new(wav_path);
     if !path.exists() {
         return Err(format!("WAV file not found: {}", wav_path));
     }
 
     let mut identified_songs = Vec::new();
+    let mut rate_limiter = RateLimiter::new(5); // 5 seconds between requests
+    let mut log = String::new();
 
     for &timestamp in timestamps {
-        println!("Identifying song at {}...", format_timestamp(timestamp));
+        let msg = format!("Identifying song at {}...", format_timestamp(timestamp));
+        println!("{}", msg);
+        log.push_str(&msg);
+        log.push('\n');
         
         // Extract 30-second segment using native WAV extraction
         let temp_file = format!("/tmp/songrec_segment_{}.wav", timestamp as u32);
         
         if let Err(e) = extract_wav_segment(wav_path, &temp_file, timestamp, 30.0) {
-            eprintln!("  Error extracting segment: {}", e);
+            let msg = format!("  Error extracting segment: {}", e);
+            eprintln!("{}", msg);
+            log.push_str(&msg);
+            log.push('\n');
             continue;
         }
+        
+        // Apply rate limiting before making the request
+        rate_limiter.wait_if_needed();
         
         // Run songrec on the extracted segment
         let output = Command::new("songrec")
             .arg("audio-file-to-recognized-song")
             .arg(&temp_file)
             .output();
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&temp_file);
 
         match output {
             Ok(result) if result.status.success() => {
@@ -55,22 +139,86 @@ pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Resul
                 // Parse songrec JSON output
                 if let Ok(mut song_data) = parse_songrec_output(&stdout) {
                     song_data.timestamp = timestamp;
-                    println!("  Found: {} - {}", song_data.artist, song_data.title);
+                    let msg = format!("  Found: {} - {}", song_data.artist, song_data.title);
+                    println!("{}", msg);
+                    log.push_str(&msg);
+                    log.push('\n');
+                    rate_limiter.report_success();
                     identified_songs.push(song_data);
                 } else {
-                    println!("  No match found");
+                    let msg = "  No match found";
+                    println!("{}", msg);
+                    log.push_str(msg);
+                    log.push('\n');
+                    rate_limiter.report_success();
                 }
             }
             Ok(result) => {
-                eprintln!("  songrec failed: {}", String::from_utf8_lossy(&result.stderr));
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                let msg = format!("  songrec failed: {}", stderr);
+                eprintln!("{}", msg);
+                log.push_str(&msg);
+                log.push('\n');
+                
+                // Check if it's a decode error (rate limiting issue)
+                if stderr.contains("Decode") || stderr.contains("expected value") {
+                    let msg = "  Retrying after 30s wait...";
+                    println!("{}", msg);
+                    log.push_str(msg);
+                    log.push('\n');
+                    thread::sleep(Duration::from_secs(30));
+                    
+                    let retry_output = Command::new("songrec")
+                        .arg("audio-file-to-recognized-song")
+                        .arg(&temp_file)
+                        .output();
+                    
+                    match retry_output {
+                        Ok(retry_result) if retry_result.status.success() => {
+                            let stdout = String::from_utf8_lossy(&retry_result.stdout);
+                            if let Ok(mut song_data) = parse_songrec_output(&stdout) {
+                                song_data.timestamp = timestamp;
+                                let msg = format!("  Retry succeeded: {} - {}", song_data.artist, song_data.title);
+                                println!("{}", msg);
+                                log.push_str(&msg);
+                                log.push('\n');
+                                // Still increase rate limit since original request failed
+                                rate_limiter.report_failure();
+                                identified_songs.push(song_data);
+                            } else {
+                                let msg = "  Retry: no match found";
+                                println!("{}", msg);
+                                log.push_str(msg);
+                                log.push('\n');
+                                rate_limiter.report_failure();  // Original request failed
+                            }
+                        }
+                        _ => {
+                            let msg = "  Retry also failed, increasing rate limit";
+                            eprintln!("{}", msg);
+                            log.push_str(msg);
+                            log.push('\n');
+                            rate_limiter.report_failure();
+                        }
+                    }
+                } else {
+                    rate_limiter.report_success();
+                }
             }
             Err(e) => {
-                eprintln!("  Error running songrec: {}", e);
+                let msg = format!("  Error running songrec: {}", e);
+                eprintln!("{}", msg);
+                log.push_str(&msg);
+                log.push('\n');
+                rate_limiter.report_success();
             }
         }
+
+        // Clean up temp file (after potential retry)
+        let _ = std::fs::remove_file(&temp_file);
     }
 
-    Ok(identified_songs)
+    Ok(IdentificationResult { songs: identified_songs, log })
 }
 
 /// Generate default timestamps with configurable first timestamp and interval
@@ -151,11 +299,14 @@ pub fn identify_album_from_songs(songs: &[IdentifiedSong]) -> Result<AlbumInfo, 
         *artist_counts.entry(song.artist.clone()).or_insert(0) += 1;
     }
     
-    // Find most common album and artist
-    let album_title = album_counts
-        .iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(album, _)| album.clone())
+    // Collect all unique album candidates sorted by frequency (most common first)
+    let mut album_candidates_counted: Vec<(String, usize)> = album_counts.into_iter().collect();
+    album_candidates_counted.sort_by(|a, b| b.1.cmp(&a.1));
+    let album_candidates: Vec<String> = album_candidates_counted.into_iter().map(|(name, _)| name).collect();
+    
+    // Most common album is the first candidate
+    let album_title = album_candidates.first()
+        .cloned()
         .unwrap_or_else(|| "Unknown Album".to_string());
     
     let album_artist = artist_counts
@@ -175,8 +326,10 @@ pub fn identify_album_from_songs(songs: &[IdentifiedSong]) -> Result<AlbumInfo, 
     Ok(AlbumInfo {
         album_title,
         album_artist,
+        album_candidates,
         songs: songs.to_vec(),
         confidence,
+        log: String::new(),
     })
 }
 
@@ -188,36 +341,106 @@ fn format_timestamp(seconds: f64) -> String {
 }
 
 /// Main function to identify album from a WAV file
-pub fn identify_album(wav_path: &str, timestamps: Option<Vec<f64>>) -> Result<AlbumInfo, String> {
+/// Returns (Result<AlbumInfo>, log_string) - log is always available even on error
+pub fn identify_album(wav_path: &str, timestamps: Option<Vec<f64>>) -> (Result<AlbumInfo, String>, String) {
+    let mut log = String::new();
+    
     // Get WAV duration if timestamps not provided
     let timestamps = if let Some(ts) = timestamps {
         ts
     } else {
+        // Read actual file duration from WAV header
+        let duration = match std::fs::File::open(wav_path) {
+            Ok(f) => {
+                let mut reader = std::io::BufReader::new(f);
+                match read_wav_header(&mut reader) {
+                    Ok(header) => {
+                        let bytes_per_sample = (header.bits_per_sample / 8) as f64;
+                        let frame_size = bytes_per_sample * header.num_channels as f64;
+                        let dur = header.data_size as f64 / (header.sample_rate as f64 * frame_size);
+                        if dur < 10.0 {
+                            let msg = format!("WAV file too short ({:.1}s), skipping identification", dur);
+                            log.push_str(&msg);
+                            log.push('\n');
+                            return (Err(msg), log);
+                        }
+                        dur
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to read WAV header: {}", e);
+                        log.push_str(&msg);
+                        log.push('\n');
+                        return (Err(msg), log);
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("Failed to open WAV file: {}", e);
+                log.push_str(&msg);
+                log.push('\n');
+                return (Err(msg), log);
+            }
+        };
         // Default: first at 1 min (60s), then every 4 mins (240s)
-        // Assume 30 minute recording
-        generate_default_timestamps(1800.0, 60.0, 240.0)
+        generate_default_timestamps(duration, 60.0, 240.0)
     };
     
-    println!("Identifying songs in: {}", wav_path);
-    println!("Using {} timestamp(s)", timestamps.len());
+    let msg = format!("Identifying songs in: {}", wav_path);
+    println!("{}", msg);
+    log.push_str(&msg);
+    log.push('\n');
+    let msg = format!("Using {} timestamp(s)", timestamps.len());
+    println!("{}", msg);
+    log.push_str(&msg);
+    log.push('\n');
+    log.push('\n');
     println!();
     
     // Identify songs at each timestamp
-    let mut songs = identify_songs_at_timestamps(wav_path, &timestamps)?;
+    let id_result = match identify_songs_at_timestamps(wav_path, &timestamps) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("Error: {}", e);
+            log.push_str(&msg);
+            log.push('\n');
+            return (Err(e), log);
+        }
+    };
+    
+    log.push_str(&id_result.log);
+    let songs = id_result.songs;
     
     if songs.is_empty() {
-        return Err("No songs could be identified".to_string());
+        let msg = "No songs could be identified".to_string();
+        log.push_str(&msg);
+        log.push('\n');
+        return (Err(msg), log);
     }
     
-    println!();
-    println!("Found {} song(s)", songs.len());
-    println!();
+    let msg = format!("\nFound {} song(s)\n", songs.len());
+    println!("{}", msg);
+    log.push_str(&msg);
+    log.push('\n');
     
     // Identify album from songs
-    let album_info = identify_album_from_songs(&songs)?;
+    let album_info = match identify_album_from_songs(&songs) {
+        Ok(info) => info,
+        Err(e) => {
+            log.push_str(&format!("Error: {}\n", e));
+            return (Err(e), log);
+        }
+    };
     
-    println!("Album: {} - {}", album_info.album_artist, album_info.album_title);
-    println!("Confidence: {:.0}%", album_info.confidence * 100.0);
+    let msg = format!("Album: {} - {}", album_info.album_artist, album_info.album_title);
+    println!("{}", msg);
+    log.push_str(&msg);
+    log.push('\n');
+    let msg = format!("Confidence: {:.0}%", album_info.confidence * 100.0);
+    println!("{}", msg);
+    log.push_str(&msg);
+    log.push('\n');
     
-    Ok(album_info)
+    let mut result = album_info;
+    result.log = log.clone();
+    (Ok(result), log)
 }

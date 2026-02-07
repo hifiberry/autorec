@@ -109,7 +109,8 @@ fn main() {
     };
 
     // Run album identification
-    match identify_album(&wav_file, timestamps) {
+    let (result, _log) = identify_album(&wav_file, timestamps);
+    match result {
         Ok(album_info) => {
             println!();
             println!("=== Album Identification Results ===");

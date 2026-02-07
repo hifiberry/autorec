@@ -8,6 +8,17 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Strip only the .wav extension from a path, preserving side numbers like .4
+/// e.g. "dj_shadow_endtroducing.4.wav" -> "dj_shadow_endtroducing.4"
+pub fn wav_base_path(wav_file: &str) -> PathBuf {
+    let p = Path::new(wav_file);
+    if p.extension().and_then(|e| e.to_str()) == Some("wav") {
+        p.with_extension("")
+    } else {
+        p.to_path_buf()
+    }
+}
+
 /// Represents a detected valley (potential song boundary)
 #[derive(Debug, Clone)]
 pub struct Valley {
@@ -99,9 +110,9 @@ pub fn generate_cue_file(
 /// * If `has_mb_match` is true: Creates `.cue` file (verified track data)
 /// * If `has_mb_match` is false: Creates `.guess.cue` file (autonomous detection)
 pub fn write_cue_file(wav_file: &str, cue_content: &str, has_mb_match: bool) -> Result<PathBuf, std::io::Error> {
-    let base_path = Path::new(wav_file).with_extension("");
+    let base_path = wav_base_path(wav_file);
     let cue_path = if has_mb_match {
-        base_path.with_extension("cue")
+        PathBuf::from(format!("{}.cue", base_path.display()))
     } else {
         // No MusicBrainz match - use .guess.cue suffix
         PathBuf::from(format!("{}.guess.cue", base_path.display()))
@@ -119,8 +130,8 @@ pub fn write_cue_file(wav_file: &str, cue_content: &str, has_mb_match: bool) -> 
 /// # Returns
 /// True if either `.cue` or `.guess.cue` file exists
 pub fn has_cue_file(wav_file: &str) -> bool {
-    let cue_path = Path::new(wav_file).with_extension("cue");
-    let base_path = Path::new(wav_file).with_extension("");
+    let base_path = wav_base_path(wav_file);
+    let cue_path = PathBuf::from(format!("{}.cue", base_path.display()));
     let guess_cue_path = PathBuf::from(format!("{}.guess.cue", base_path.display()));
     cue_path.exists() || guess_cue_path.exists()
 }
@@ -253,7 +264,7 @@ pub fn generate_info_file(
 /// # Returns
 /// Path to the created info file, or an error
 pub fn write_info_file(wav_file: &str, info_content: &str, has_mb_match: bool) -> Result<PathBuf, std::io::Error> {
-    let base_path = Path::new(wav_file).with_extension("");
+    let base_path = wav_base_path(wav_file);
     let info_path = if has_mb_match {
         PathBuf::from(format!("{}.cue.txt", base_path.display()))
     } else {
