@@ -17,6 +17,7 @@ use autorec::musicbrainz;
 use autorec::cuefile::{self, Valley};
 use autorec::wavfile;
 use autorec::audio_analysis;
+use autorec::album_identifier;
 use std::env;
 use std::fs::{File, self};
 use std::io::{BufReader, Read};
@@ -462,6 +463,7 @@ fn main() {
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let dump = args.iter().any(|a| a == "--dump");
     let no_lookup = args.iter().any(|a| a == "--no-lookup");
+    let use_shazam = args.iter().any(|a| a == "--use-shazam" || a == "--shazam");
     let no_cue = args.iter().any(|a| a == "--no-cue");
     let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
     
@@ -566,6 +568,7 @@ fn main() {
         println!("  --recursive, -r          Process subdirectories recursively");
         println!("  --dump                   Dump RMS curve (tab-separated, for plotting)");
         println!("  --no-lookup              Skip MusicBrainz release lookup");
+        println!("  --use-shazam, --shazam   Use Shazam (via songrec) instead of MusicBrainz");
         println!("  --no-cue                 Don't generate CUE files");
         println!("  --min-prominence <DB>    Minimum valley depth below local average (default: 3.0)");
         println!("  --min-song <SEC>         Minimum song duration in seconds (default: 30)");
@@ -623,7 +626,7 @@ fn main() {
         }
         
         process_file(wav_file, verbose, dump, min_prominence, min_song_duration,
-                     smooth_window_secs, chunk_ms, no_lookup, no_cue);
+                     smooth_window_secs, chunk_ms, no_lookup, use_shazam, no_cue);
     }
 }
 
@@ -636,6 +639,7 @@ fn process_file(
     smooth_window_secs: f64,
     chunk_ms: u32,
     no_lookup: bool,
+    use_shazam: bool,
     no_cue: bool,
 ) {
     if !Path::new(wav_file).exists() {
@@ -775,60 +779,96 @@ fn process_file(
     let music_start_idx = timestamps.iter().position(|&t| t >= groove_in).unwrap_or(0);
     let music_end_idx = timestamps.iter().position(|&t| t >= groove_out).unwrap_or(timestamps.len());
     
-    // ==== MusicBrainz lookup ====
+    // ==== Metadata lookup (Shazam or MusicBrainz) ====
     let mut track_names: Vec<String> = Vec::new();
+    let mut artist: String = "Unknown Artist".to_string();
+    let mut album_title: String = "Unknown Album".to_string();
     let mut mb_info: Option<String> = None;
     let mut mb_tracks: Option<Vec<musicbrainz::ExpectedTrack>> = None;
     let mut use_guided_detection = false;
-    
+
     if !no_lookup {
-        println!("MusicBrainz Lookup:");
-        println!("-------------------");
-        match musicbrainz::auto_lookup_release(wav_file, music_duration, verbose) {
-            Ok(Some(release)) => {
-                println!("Found: {} - {}", release.artist, release.title);
-                println!("Release ID: {}", release.release_id);
-                println!("Format: {}", if release.is_vinyl { "Vinyl" } else { "Other" });
-                println!("Tracks: {}", release.track_count);
-                println!("URL: https://musicbrainz.org/release/{}", release.release_id);
-                
-                mb_info = Some(format!("{} - {} [{}]",
-                                       release.artist, release.title, release.release_id));
-                
-                // Fetch track listing for this side
-                if let Ok(all_tracks) = musicbrainz::fetch_release_info(&release.release_id) {
-                    let (_, side_tracks) = musicbrainz::match_tracks_to_duration(&all_tracks, music_duration);
+        if use_shazam {
+            // Use Shazam (songrec) for album identification
+            println!("Album Identification (Shazam):");
+            println!("------------------------------");
+            
+            // Use default timestamps: first at 1 min, then every 4 mins
+            match album_identifier::identify_album(wav_file, None) {
+                Ok(album_info) => {
+                    artist = album_info.album_artist.clone();
+                    album_title = album_info.album_title.clone();
                     
-                    // Check if duration match is good enough for guided detection (within 3%)
-                    let expected_duration: f64 = side_tracks.iter().map(|t| t.length_seconds).sum();
-                    let duration_error = (expected_duration - music_duration).abs();
-                    let error_percent = (duration_error / music_duration) * 100.0;
+                    println!("Album:  {}", album_title);
+                    println!("Artist: {}", artist);
+                    println!("Confidence: {:.0}%", album_info.confidence * 100.0);
+                    println!("Songs identified: {}", album_info.songs.len());
                     
-                    if error_percent <= 3.0 && side_tracks.len() >= 2 {
-                        use_guided_detection = true;
-                        mb_tracks = Some(side_tracks.clone());
-                        if verbose {
-                            println!("Duration match: {:.1}% error - using guided detection", error_percent);
-                        }
-                    } else if verbose {
-                        println!("Duration match: {:.1}% error - using autonomous detection", error_percent);
-                    }
-                    
-                    track_names = side_tracks.iter()
-                        .map(|t| format!("#{} {}", t.position, t.title))
+                    // Track names from identified songs (without timestamps)
+                    track_names = album_info.songs.iter()
+                        .map(|s| format!("{} - {}", s.artist, s.title))
                         .collect();
+                    
+                    mb_info = Some(format!("{} - {} [Shazam]", artist, album_title));
+                }
+                Err(e) => {
+                    println!("Identification failed: {}", e);
                 }
             }
-            Ok(None) => {
-                println!("No matching release found");
-            }
-            Err(e) => {
-                if verbose {
-                    println!("Lookup failed: {}", e);
+            println!();
+        } else {
+            // Use MusicBrainz filename-based lookup
+            println!("MusicBrainz Lookup:");
+            println!("-------------------");
+            match musicbrainz::auto_lookup_release(wav_file, music_duration, verbose) {
+                Ok(Some(release)) => {
+                    artist = release.artist.clone();
+                    album_title = release.title.clone();
+                    
+                    println!("Found: {} - {}", artist, album_title);
+                    println!("Release ID: {}", release.release_id);
+                    println!("Format: {}", if release.is_vinyl { "Vinyl" } else { "Other" });
+                    println!("Tracks: {}", release.track_count);
+                    println!("URL: https://musicbrainz.org/release/{}", release.release_id);
+                    
+                    mb_info = Some(format!("{} - {} [{}]",
+                                           artist, album_title, release.release_id));
+                    
+                    // Fetch track listing for this side
+                    if let Ok(all_tracks) = musicbrainz::fetch_release_info(&release.release_id) {
+                        let (_, side_tracks) = musicbrainz::match_tracks_to_duration(&all_tracks, music_duration);
+                        
+                        // Check if duration match is good enough for guided detection (within 3%)
+                        let expected_duration: f64 = side_tracks.iter().map(|t| t.length_seconds).sum();
+                        let duration_error = (expected_duration - music_duration).abs();
+                        let error_percent = (duration_error / music_duration) * 100.0;
+                        
+                        if error_percent <= 3.0 && side_tracks.len() >= 2 {
+                            use_guided_detection = true;
+                            mb_tracks = Some(side_tracks.clone());
+                            if verbose {
+                                println!("Duration match: {:.1}% error - using guided detection", error_percent);
+                            }
+                        } else if verbose {
+                            println!("Duration match: {:.1}% error - using autonomous detection", error_percent);
+                        }
+                        
+                        track_names = side_tracks.iter()
+                            .map(|t| format!("#{} {}", t.position, t.title))
+                            .collect();
+                    }
+                }
+                Ok(None) => {
+                    println!("No matching release found");
+                }
+                Err(e) => {
+                    if verbose {
+                        println!("Lookup failed: {}", e);
+                    }
                 }
             }
+            println!();
         }
-        println!();
     }
     
     // Dump mode
@@ -919,27 +959,12 @@ fn process_file(
     
     // ==== Generate CUE file ====
     if !no_cue && !valleys.is_empty() {
-        let artist = mb_info.as_ref()
-            .and_then(|info| info.split(" - ").next())
-            .unwrap_or("Unknown Artist");
+        let cue_content = cuefile::generate_cue_file(wav_file, &artist, &album_title, &track_names, groove_in, &valleys);
         
-        let title = mb_info.as_ref()
-            .and_then(|info| {
-                let parts: Vec<&str> = info.split(" - ").collect();
-                if parts.len() >= 2 {
-                    parts[1].split(" [").next()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or("Unknown Album");
+        // Use .cue for MusicBrainz/Shazam matched, .guess.cue otherwise
+        let has_metadata_match = mb_info.is_some();
         
-        let cue_content = cuefile::generate_cue_file(wav_file, artist, title, &track_names, groove_in, &valleys);
-        
-        // Use .cue for MusicBrainz matched, .guess.cue otherwise
-        let has_mb_match = mb_info.is_some();
-        
-        match cuefile::write_cue_file(wav_file, &cue_content, has_mb_match) {
+        match cuefile::write_cue_file(wav_file, &cue_content, has_metadata_match) {
             Ok(cue_path) => {
                 println!("CUE file created: {}", cue_path.display());
             }
@@ -965,7 +990,7 @@ fn process_file(
             mb_info.as_deref(),
         );
         
-        match cuefile::write_info_file(wav_file, &info_content, has_mb_match) {
+        match cuefile::write_info_file(wav_file, &info_content, has_metadata_match) {
             Ok(info_path) => {
                 println!("Info file created: {}", info_path.display());
             }

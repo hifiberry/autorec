@@ -10,17 +10,8 @@ pub mod musicbrainz;
 pub mod pause_detector;
 pub mod pipewire_utils;
 pub mod recorder;
-pub mod song_detect;
 pub mod vu_meter;
 pub mod wavfile;
-
-// Shazam fingerprinting — mounted from shazamio-core submodule unchanged.
-// This makes `crate::fingerprinting::*` paths inside shazamio-core resolve correctly.
-#[path = "../shazamio-core/src/fingerprinting/mod.rs"]
-pub mod fingerprinting;
-
-// Shazam HTTP API client (our code)
-pub mod shazam;
 
 pub use audio_stream::{
     create_input_stream, parse_audio_address, AlsaInputStream, AudioInputStream, AudioStream,
