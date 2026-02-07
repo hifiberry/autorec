@@ -1,6 +1,7 @@
 use std::process::Command;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
+use crate::wavfile::extract_wav_segment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentifiedSong {
@@ -30,22 +31,11 @@ pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Resul
     for &timestamp in timestamps {
         println!("Identifying song at {}...", format_timestamp(timestamp));
         
-        // Extract 30-second segment using ffmpeg (songrec doesn't support seeking)
+        // Extract 30-second segment using native WAV extraction
         let temp_file = format!("/tmp/songrec_segment_{}.wav", timestamp as u32);
         
-        let extract_result = Command::new("ffmpeg")
-            .args(&[
-                "-i", wav_path,
-                "-ss", &timestamp.to_string(),
-                "-t", "30",  // 30 seconds
-                "-y",  // Overwrite output file
-                &temp_file
-            ])
-            .stderr(std::process::Stdio::null())  // Hide ffmpeg output
-            .status();
-        
-        if let Err(e) = extract_result {
-            eprintln!("  Error extracting segment with ffmpeg: {}", e);
+        if let Err(e) = extract_wav_segment(wav_path, &temp_file, timestamp, 30.0) {
+            eprintln!("  Error extracting segment: {}", e);
             continue;
         }
         
