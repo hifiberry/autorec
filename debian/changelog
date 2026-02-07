@@ -1,8 +1,16 @@
-hifiberry-autorec (0.1.5) UNRELEASED; urgency=medium
+hifiberry-autorec (0.1.5) stable; urgency=medium
 
-  * Add man pages for all tools; Add boundary_finder to package
+  * Add man pages for all tools (autorecord, cue_creator, pause_analyzer, vu_meter)
+  * Renamed boundary_finder to cue_creator
+  * Added --recursive flag for subdirectory processing in cue_creator
+  * Added automatic directory detection in cue_creator
+  * Added .txt info files with timing analysis and MusicBrainz adjustments
+  * Fix --duration 0 to mean unlimited recording (prevent premature exit)
+  * Fix --source parameter to actually connect to specified PipeWire source
+  * Add validation for PipeWire sources (exit with error if source doesn't exist)
+  * Extracted wavfile, audio_analysis, and cuefile modules for better code organization
 
- --  <support@hifiberry.com>  Fri, 06 Feb 2026 21:38:24 +0000
+ -- HiFiBerry <support@hifiberry.com>  Fri, 07 Feb 2026 07:30:00 +0000
 
 hifiberry-autorec (0.1.4) stable; urgency=medium
 

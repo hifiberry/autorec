@@ -37,7 +37,7 @@ fn print_usage() {
     println!("  --off-threshold <THRESH> Threshold for on/off detection in dB (default: -60)");
     println!("  --silence-duration <SEC> Duration of silence before recording stops (default: 10)");
     println!("  --min-length <SEC>       Minimum recording length in seconds (default: 600)");
-    println!("  --duration <SEC>         Maximum recording duration in seconds (optional)");
+    println!("  --duration <SEC>         Maximum recording duration in seconds (0=unlimited)");
     println!("  --detect-interval <SEC>  Song detection interval in seconds (default: 180, 0=off)");
     println!("  --no-shazam              Disable song detection");
     println!("  --no-vumeter             Disable VU meter display (simple text output)");
@@ -243,8 +243,16 @@ fn main() {
             }
             "--duration" => {
                 if i + 1 < args.len() {
-                    duration = Some(args[i + 1].parse().unwrap_or(60.0));
-                    min_length = 0.0;  // Disable min length check when using duration
+                    let dur_value: f64 = args[i + 1].parse().unwrap_or(60.0);
+                    // duration=0 means unlimited (same as not setting it)
+                    if dur_value > 0.0 {
+                        duration = Some(dur_value);
+                    } else {
+                        duration = None;
+                    }
+                    if dur_value > 0.0 {
+                        min_length = 0.0;  // Disable min length check when using duration
+                    }
                     i += 1;
                 }
             }
@@ -293,7 +301,27 @@ fn main() {
 
     // Determine the audio source address
     let source_address = if let Some(src) = source {
-        src
+        // Parse to determine backend
+        let (backend, device) = match parse_audio_address(&src) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Error parsing audio source '{}': {}", src, e);
+                process::exit(1);
+            }
+        };
+        
+        // Validate PipeWire sources exist
+        if backend == "pipewire" {
+            let (validated_target, error_code) = validate_and_select_target(Some(&device), true);
+            if error_code != 0 {
+                eprintln!("\nAvailable sources:");
+                list_targets();
+                process::exit(error_code);
+            }
+            format!("pipewire:{}", validated_target.unwrap())
+        } else {
+            src
+        }
     } else {
         // Try to auto-detect a PipeWire source
         let (selected_target, error_code) = validate_and_select_target(None, true);

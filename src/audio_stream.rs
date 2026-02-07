@@ -119,7 +119,7 @@ pub trait AudioInputStream: AudioStream {
 
 /// Native PipeWire audio input stream using the Rust pipewire crate
 pub struct PipeWireInputStream {
-    _target: String,
+    target: String,
     rate: u32,
     channels: usize,
     format: SampleFormat,
@@ -133,7 +133,7 @@ impl PipeWireInputStream {
     /// Create a new native PipeWire input stream
     pub fn new(target: String, rate: u32, channels: usize, format: SampleFormat) -> Result<Self, String> {
         Ok(PipeWireInputStream {
-            _target: target,
+            target,
             rate,
             channels,
             format,
@@ -202,6 +202,8 @@ impl AudioInputStream for PipeWireInputStream {
         let rate = self.rate;
         let channels = self.channels;
         let format = self.format;
+        let target = self.target.clone();
+        let target_for_linking = self.target.clone();
         
         // Reset quit flag
         self.quit_flag.store(false, Ordering::Relaxed);
@@ -349,13 +351,21 @@ impl AudioInputStream for PipeWireInputStream {
             
             let mut params = [Pod::from_bytes(&values).unwrap()];
             
-            // Connect the stream
+            // Connect the stream (without AUTOCONNECT if we have a specific target)
+            let use_autoconnect = target.is_empty();
+            let stream_flags = if use_autoconnect {
+                pw::stream::StreamFlags::AUTOCONNECT
+                    | pw::stream::StreamFlags::MAP_BUFFERS
+                    | pw::stream::StreamFlags::RT_PROCESS
+            } else {
+                pw::stream::StreamFlags::MAP_BUFFERS
+                    | pw::stream::StreamFlags::RT_PROCESS
+            };
+            
             if let Err(e) = stream.connect(
                 pw::spa::utils::Direction::Input,
                 None,
-                pw::stream::StreamFlags::AUTOCONNECT
-                    | pw::stream::StreamFlags::MAP_BUFFERS
-                    | pw::stream::StreamFlags::RT_PROCESS,
+                stream_flags,
                 &mut params,
             ) {
                 eprintln!("Failed to connect stream: {:?}", e);
@@ -373,8 +383,62 @@ impl AudioInputStream for PipeWireInputStream {
         self.thread_handle = Some(thread_handle);
         self.active = true;
         
-        // Give the stream a moment to start up
-        std::thread::sleep(Duration::from_millis(200));
+        // If we have a specific target, manually connect using pw-link
+        if !target_for_linking.is_empty() {
+            // Wait for stream ports to be ready (check for up to 3 seconds)
+            let mut ports_ready = false;
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(100));
+                
+                // Check if autorecord ports exist
+                if let Ok(output) = std::process::Command::new("pw-link")
+                    .arg("-i")
+                    .output()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.contains("autorecord:input_FL") && stdout.contains("autorecord:input_FR") {
+                        ports_ready = true;
+                        break;
+                    }
+                }
+            }
+            
+            if !ports_ready {
+                eprintln!("Warning: autorecord ports not ready after 3 seconds");
+                return Err("Stream ports not ready".to_string());
+            }
+            
+            // Connect left channel
+            let output_l = std::process::Command::new("pw-link")
+                .arg(format!("{}:capture_FL", target_for_linking))
+                .arg("autorecord:input_FL")
+                .output();
+            
+            if let Ok(output) = output_l {
+                if !output.status.success() {
+                    eprintln!("Error: Failed to link {}:capture_FL -> autorecord:input_FL", target_for_linking);
+                    eprintln!("  {}", String::from_utf8_lossy(&output.stderr));
+                    return Err("Failed to link audio source".to_string());
+                }
+            }
+            
+            // Connect right channel
+            let output_r = std::process::Command::new("pw-link")
+                .arg(format!("{}:capture_FR", target_for_linking))
+                .arg("autorecord:input_FR")
+                .output();
+            
+            if let Ok(output) = output_r {
+                if !output.status.success() {
+                    eprintln!("Error: Failed to link {}:capture_FR -> autorecord:input_FR", target_for_linking);
+                    eprintln!("  {}", String::from_utf8_lossy(&output.stderr));
+                    return Err("Failed to link audio source".to_string());
+                }
+            }
+        } else {
+            // Give the stream a moment to start up with autoconnect
+            std::thread::sleep(Duration::from_millis(200));
+        }
         
         Ok(())
     }
