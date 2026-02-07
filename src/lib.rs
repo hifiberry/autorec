@@ -1,5 +1,6 @@
 pub mod audio_analysis;
 pub mod audio_stream;
+pub mod album_identifier;
 pub mod config;
 pub mod cuefile;
 pub mod decibel;
@@ -25,6 +26,7 @@ pub use audio_stream::{
     create_input_stream, parse_audio_address, AlsaInputStream, AudioInputStream, AudioStream,
     PipeWireInputStream,
 };
+pub use album_identifier::{identify_album, identify_album_from_songs, AlbumInfo, IdentifiedSong};
 pub use config::Config;
 pub use display::display_vu_meter;
 pub use pause_detector::AdaptivePauseDetector;
