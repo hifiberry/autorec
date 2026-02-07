@@ -30,20 +30,41 @@ pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Resul
     for &timestamp in timestamps {
         println!("Identifying song at {}...", format_timestamp(timestamp));
         
-        // Run songrec to identify the song at this timestamp
+        // Extract 30-second segment using ffmpeg (songrec doesn't support seeking)
+        let temp_file = format!("/tmp/songrec_segment_{}.wav", timestamp as u32);
+        
+        let extract_result = Command::new("ffmpeg")
+            .args(&[
+                "-i", wav_path,
+                "-ss", &timestamp.to_string(),
+                "-t", "30",  // 30 seconds
+                "-y",  // Overwrite output file
+                &temp_file
+            ])
+            .stderr(std::process::Stdio::null())  // Hide ffmpeg output
+            .status();
+        
+        if let Err(e) = extract_result {
+            eprintln!("  Error extracting segment with ffmpeg: {}", e);
+            continue;
+        }
+        
+        // Run songrec on the extracted segment
         let output = Command::new("songrec")
             .arg("audio-file-to-recognized-song")
-            .arg(wav_path)
-            .arg("--offset")
-            .arg(timestamp.to_string())
+            .arg(&temp_file)
             .output();
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_file);
 
         match output {
             Ok(result) if result.status.success() => {
                 let stdout = String::from_utf8_lossy(&result.stdout);
                 
                 // Parse songrec JSON output
-                if let Ok(song_data) = parse_songrec_output(&stdout) {
+                if let Ok(mut song_data) = parse_songrec_output(&stdout) {
+                    song_data.timestamp = timestamp;
                     println!("  Found: {} - {}", song_data.artist, song_data.title);
                     identified_songs.push(song_data);
                 } else {
@@ -193,11 +214,6 @@ pub fn identify_album(wav_path: &str, timestamps: Option<Vec<f64>>) -> Result<Al
     
     // Identify songs at each timestamp
     let mut songs = identify_songs_at_timestamps(wav_path, &timestamps)?;
-    
-    // Set timestamps on identified songs
-    for (song, &ts) in songs.iter_mut().zip(timestamps.iter()) {
-        song.timestamp = ts;
-    }
     
     if songs.is_empty() {
         return Err("No songs could be identified".to_string());
