@@ -73,14 +73,14 @@ pub fn identify_songs_at_timestamps(wav_path: &str, timestamps: &[f64]) -> Resul
     Ok(identified_songs)
 }
 
-/// Generate default timestamps: 1:00, then every 6 minutes
-pub fn generate_default_timestamps(duration_seconds: f64) -> Vec<f64> {
-    let mut timestamps = vec![60.0]; // Start at 1:00
+/// Generate default timestamps with configurable first timestamp and interval
+pub fn generate_default_timestamps(duration_seconds: f64, first_seconds: f64, interval_seconds: f64) -> Vec<f64> {
+    let mut timestamps = vec![first_seconds]; // Start at first_seconds
     
-    let mut current = 60.0 + 360.0; // Next at 1:00 + 6:00 = 7:00
+    let mut current = first_seconds + interval_seconds;
     while current < duration_seconds - 30.0 { // Leave 30s margin at end
         timestamps.push(current);
-        current += 360.0; // Add 6 minutes
+        current += interval_seconds;
     }
     
     timestamps
@@ -193,9 +193,9 @@ pub fn identify_album(wav_path: &str, timestamps: Option<Vec<f64>>) -> Result<Al
     let timestamps = if let Some(ts) = timestamps {
         ts
     } else {
-        // For now, use a reasonable default (assume 30 minute recording)
-        // In production, we should read the WAV header
-        generate_default_timestamps(1800.0)
+        // Default: first at 1 min (60s), then every 4 mins (240s)
+        // Assume 30 minute recording
+        generate_default_timestamps(1800.0, 60.0, 240.0)
     };
     
     println!("Identifying songs in: {}", wav_path);

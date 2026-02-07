@@ -29,8 +29,6 @@ pub use audio_stream::{
 pub use album_identifier::{identify_album, identify_album_from_songs, AlbumInfo, IdentifiedSong};
 pub use config::Config;
 pub use display::display_vu_meter;
-pub use pause_detector::AdaptivePauseDetector;
 pub use pipewire_utils::{get_available_targets, list_targets, validate_and_select_target};
 pub use recorder::AudioRecorder;
-pub use song_detect::SongDetectScheduler;
 pub use vu_meter::{process_audio_chunk, ChannelMetrics, SampleFormat, VUMeter};

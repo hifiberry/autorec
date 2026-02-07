@@ -7,7 +7,7 @@
 //! - Adaptive parameter changes
 //! - Summary statistics
 
-use autorec::{AdaptivePauseDetector, SampleFormat};
+use autorec::{pause_detector::AdaptivePauseDetector, SampleFormat};
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};

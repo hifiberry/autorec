@@ -1,4 +1,4 @@
-use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AdaptivePauseDetector, AudioRecorder, Config, SampleFormat, SongDetectScheduler, VUMeter};
+use autorec::{create_input_stream, display_vu_meter, list_targets, parse_audio_address, process_audio_chunk, validate_and_select_target, AudioRecorder, Config, SampleFormat, VUMeter};
 use std::env;
 use std::process;
 use std::thread;
@@ -98,8 +98,6 @@ fn main() {
     let mut no_vumeter = effective_config.no_vumeter.unwrap_or(false);
     let mut no_keyboard = effective_config.no_keyboard.unwrap_or(false);
     let mut duration: Option<f64> = None;
-    let mut detect_interval: f64 = 180.0;  // Song detection every 3 minutes
-    let mut no_shazam = false;
     let mut generate_cue = true;  // Generate CUE files by default
 
     // Track which options were explicitly set on command line
@@ -236,15 +234,8 @@ fn main() {
                 no_keyboard = true;
                 cmdline_config.no_keyboard = Some(true);
             }
-            "--no-shazam" => no_shazam = true,
             "--generate-cue" => generate_cue = true,
             "--no-generate-cue" => generate_cue = false,
-            "--detect-interval" => {
-                if i + 1 < args.len() {
-                    detect_interval = args[i + 1].parse().unwrap_or(180.0);
-                    i += 1;
-                }
-            }
             "--duration" => {
                 if i + 1 < args.len() {
                     let dur_value: f64 = args[i + 1].parse().unwrap_or(60.0);
@@ -368,16 +359,6 @@ fn main() {
         silence_duration,
     );
 
-    // Create song detection scheduler (0 = disabled)
-    let mut song_detector: Option<SongDetectScheduler> = if !no_shazam && detect_interval > 0.0 {
-        Some(SongDetectScheduler::new(detect_interval, rate, channels, format))
-    } else {
-        None
-    };
-
-    // Create adaptive pause detector for song boundaries
-    let mut pause_detector = AdaptivePauseDetector::new(rate);
-
     // Start recording
     if let Err(e) = meter.start() {
         eprintln!("Failed to start recording: {}", e);
@@ -393,9 +374,6 @@ fn main() {
         println!("Recording started. Press ESC or 'q' to quit.");
         // Enable raw mode for keyboard input
         enable_raw_mode().ok();
-    }
-    if !no_shazam && detect_interval > 0.0 {
-        println!("Song detection every {} seconds.", detect_interval as u64);
     }
     println!("Waiting for signal...");
     println!();
@@ -440,28 +418,6 @@ fn main() {
                 // Write the actual audio data to the recorder
                 recorder.write_audio(&audio_data, any_channel_on);
 
-                // Feed audio to song detector and tick while recording
-                if let Some(ref mut detector) = song_detector {
-                    if is_recording {
-                        detector.feed_audio(&audio_data);
-                        detector.tick();
-                    } else {
-                        detector.reset();
-                    }
-                }
-
-                // Feed audio to pause detector for song boundary detection
-                if is_recording {
-                    if pause_detector.feed_audio(&audio_data, format).is_some() {
-                        // Song boundary detected - trigger immediate recognition
-                        if let Some(ref mut detector) = song_detector {
-                            detector.trigger_immediate();
-                        }
-                    }
-                } else {
-                    pause_detector.reset();
-                }
-
                 if !no_vumeter {
                     // Build status lines
                     let mut status_parts: Vec<String> = Vec::new();
@@ -472,20 +428,6 @@ fn main() {
                             status_parts.push(format!("[RECORDING to {}]", filename));
                         } else {
                             status_parts.push("[RECORDING]".to_string());
-                        }
-                    }
-
-                    // Pause detector status (song number)
-                    if is_recording {
-                        if let Some(song_line) = pause_detector.status_line() {
-                            status_parts.push(song_line);
-                        }
-                    }
-
-                    // Song detection status
-                    if let Some(ref detector) = song_detector {
-                        if let Some(song_line) = detector.status_line() {
-                            status_parts.push(song_line);
                         }
                     }
 
