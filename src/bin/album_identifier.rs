@@ -1,4 +1,4 @@
-use autorec::identify_album;
+use autorec::identify_songs;
 use std::env;
 use std::process;
 
@@ -108,19 +108,15 @@ fn main() {
         custom_timestamps
     };
 
-    // Run album identification
-    let (result, _log) = identify_album(&wav_file, timestamps);
+    // Run song identification
+    let (result, _log) = identify_songs(&wav_file, timestamps);
     match result {
-        Ok(album_info) => {
+        Ok(songs) => {
             println!();
-            println!("=== Album Identification Results ===");
+            println!("=== Song Identification Results ===");
             println!();
-            println!("Album:  {}", album_info.album_title);
-            println!("Artist: {}", album_info.album_artist);
-            println!("Confidence: {:.0}%", album_info.confidence * 100.0);
-            println!();
-            println!("Identified Songs:");
-            for (i, song) in album_info.songs.iter().enumerate() {
+            println!("Identified Songs: {}", songs.len());
+            for (i, song) in songs.iter().enumerate() {
                 let mins = (song.timestamp / 60.0) as u32;
                 let secs = (song.timestamp % 60.0) as u32;
                 println!("  {}. [{}:{:02}] {} - {}", 

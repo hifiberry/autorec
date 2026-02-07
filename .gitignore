@@ -13,5 +13,8 @@ debian/hifiberry-autorec/
 debian/*.debhelper.log
 debian/tmp/
 
+# Discogs API credentials (do not commit)
+discogs_credentials.toml
+
 # AI assistant notes (not for committing)
 .ai-notes*.wav
