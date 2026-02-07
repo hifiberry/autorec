@@ -42,7 +42,7 @@ fn print_usage() {
     println!("  --no-shazam              Disable song detection");
     println!("  --no-vumeter             Disable VU meter display (simple text output)");
     println!("  --no-keyboard            Disable keyboard shortcuts (no raw mode)");
-    println!("  --generate-cue           Generate CUE files for recorded tracks after exit");
+    println!("  --no-generate-cue        Disable automatic CUE file generation after recording");
     println!("  --help                   Show this help message");
     println!();
     println!("Configuration:");
@@ -100,7 +100,7 @@ fn main() {
     let mut duration: Option<f64> = None;
     let mut detect_interval: f64 = 180.0;  // Song detection every 3 minutes
     let mut no_shazam = false;
-    let mut generate_cue = false;
+    let mut generate_cue = true;  // Generate CUE files by default
 
     // Track which options were explicitly set on command line
     let mut cmdline_config = Config::new();
@@ -238,6 +238,7 @@ fn main() {
             }
             "--no-shazam" => no_shazam = true,
             "--generate-cue" => generate_cue = true,
+            "--no-generate-cue" => generate_cue = false,
             "--detect-interval" => {
                 if i + 1 < args.len() {
                     detect_interval = args[i + 1].parse().unwrap_or(180.0);
