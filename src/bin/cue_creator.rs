@@ -18,7 +18,7 @@ use autorec::cuefile::{self, Valley};
 use autorec::wavfile;
 use autorec::audio_analysis;
 use autorec::album_identifier;
-use autorec::lookup::{self, DiscogsBackend, MusicBrainzBackend, AlbumSideIdentifier};
+use autorec::lookup::{self, DiscogsBackend, MusicBrainzBackend, AlbumIdentifier, FileForAssignment, FileSideResult};
 use std::env;
 use std::fs::{File, self};
 use std::io::{BufReader, Read};
@@ -470,6 +470,28 @@ fn find_song_boundaries(
     filtered
 }
 
+/// Determine the dominant (most frequent) artist from a set of identified songs.
+/// Returns "Unknown" if no songs are available.
+fn dominant_artist(songs: &[album_identifier::IdentifiedSong]) -> String {
+    if songs.is_empty() {
+        return "Unknown".to_string();
+    }
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for song in songs {
+        *counts.entry(song.artist.to_lowercase()).or_default() += 1;
+    }
+    // Find the artist with the most songs, return the original-case version
+    let best_lower = counts.into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(a, _)| a)
+        .unwrap_or_default();
+    // Return original-case from first matching song
+    songs.iter()
+        .find(|s| s.artist.to_lowercase() == best_lower)
+        .map(|s| s.artist.clone())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
 fn collect_wav_files(directory: &str, recursive: bool) -> Vec<PathBuf> {
     let mut wav_files = Vec::new();
     
@@ -754,16 +776,266 @@ fn main() {
         println!("No files to process (all files already have .cue files)");
         process::exit(0);
     }
-    
+
+    // ── Multi-file album identification ──────────────────────────────────
+    // When processing multiple files and lookup is enabled, iteratively
+    // identify albums: pool songs from all remaining files, find the best
+    // album, assign matching files to its sides, remove them, repeat.
+    // This handles directories with files from multiple different albums.
+    let mut album_overrides: std::collections::HashMap<String, FileSideResult> =
+        std::collections::HashMap::new();
+
+    if files_to_process.len() > 1 && !no_shazam && (!no_discogs || !no_musicbrainz) {
+        println!("Multi-file album identification");
+        println!("================================");
+        println!("Pre-identifying {} files...\n", files_to_process.len());
+
+        // Step 1: Identify songs per file
+        struct PreIdentified {
+            path: String,
+            songs: Vec<album_identifier::IdentifiedSong>,
+            duration: f64,
+        }
+        let mut pre_identified: Vec<PreIdentified> = Vec::new();
+
+        for wav_file in &files_to_process {
+            let name = Path::new(wav_file)
+                .file_name().and_then(|n| n.to_str()).unwrap_or(wav_file);
+
+            let file_duration = match std::fs::File::open(wav_file) {
+                Ok(f) => {
+                    let mut r = BufReader::new(f);
+                    match wavfile::read_wav_header(&mut r) {
+                        Ok(h) => {
+                            let bps = (h.bits_per_sample / 8) as f64;
+                            h.data_size as f64 / (h.sample_rate as f64 * h.num_channels as f64 * bps)
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
+            };
+
+            let (result, _log) = album_identifier::identify_songs(wav_file, None);
+            let songs = match result {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  {}: identification failed: {}", name, e);
+                    continue;
+                }
+            };
+
+            println!("  {}: {} song(s), {:.0}s", name, songs.len(), file_duration);
+            for s in &songs {
+                println!("    {} - {}", s.artist, s.title);
+            }
+
+            pre_identified.push(PreIdentified {
+                path: wav_file.to_string(),
+                songs,
+                duration: file_duration,
+            });
+        }
+
+        println!();
+
+        // Step 2: Group files by dominant Shazam artist
+        // Files whose songs are mostly by the same artist are grouped together.
+        // This avoids mixing songs from different artists when pooling.
+        let mut artist_groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+
+        for (idx, pi) in pre_identified.iter().enumerate() {
+            let dominant = dominant_artist(&pi.songs);
+            artist_groups.entry(dominant).or_default().push(idx);
+        }
+
+        // Sort groups by size (largest first) for deterministic ordering
+        let mut groups: Vec<(String, Vec<usize>)> = artist_groups.into_iter().collect();
+        groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        println!("Found {} artist group(s):", groups.len());
+        for (artist, indices) in &groups {
+            let names: Vec<&str> = indices.iter()
+                .map(|&i| {
+                    Path::new(&pre_identified[i].path)
+                        .file_name().and_then(|n| n.to_str())
+                        .unwrap_or(&pre_identified[i].path)
+                })
+                .collect();
+            println!("  {} ({} file(s)): {}", artist, indices.len(), names.join(", "));
+        }
+        println!();
+
+        // Step 3: Build backends
+        let discogs_backend = DiscogsBackend;
+        let mb_vinyl = MusicBrainzBackend { vinyl_only: true };
+        let mb_all = MusicBrainzBackend { vinyl_only: false };
+
+        let mut backends: Vec<&dyn AlbumIdentifier> = Vec::new();
+        if !no_discogs { backends.push(&discogs_backend); }
+        if !no_musicbrainz { backends.push(&mb_vinyl); }
+        if !no_musicbrainz { backends.push(&mb_all); }
+
+        // Step 4: For each artist group, iteratively find albums and assign
+        // Minimum score to consider a file "matched" to an album side.
+        const MIN_MATCH_SCORE: f64 = 25.0;
+
+        for (artist, group_indices) in &groups {
+            if group_indices.len() < 2 {
+                println!("Skipping {} (only 1 file, will use per-file lookup)", artist);
+                println!();
+                continue;
+            }
+
+            println!("=== {} ({} files) ===", artist, group_indices.len());
+
+            let mut remaining: Vec<usize> = group_indices.clone();
+            let mut round = 0;
+
+            while remaining.len() >= 2 {
+                round += 1;
+                println!("--- Album search round {} ({} files remaining) ---",
+                         round, remaining.len());
+
+                // Pool songs from remaining files in this group
+                let mut seen = std::collections::HashSet::new();
+                let mut pooled: Vec<album_identifier::IdentifiedSong> = Vec::new();
+                for &idx in &remaining {
+                    for song in &pre_identified[idx].songs {
+                        let key = (song.artist.to_lowercase(), song.title.to_lowercase());
+                        if seen.insert(key) {
+                            pooled.push(song.clone());
+                        }
+                    }
+                }
+
+                if pooled.is_empty() {
+                    println!("  No songs to search with");
+                    break;
+                }
+
+                let avg_duration = remaining.iter()
+                    .map(|&i| pre_identified[i].duration)
+                    .sum::<f64>() / remaining.len() as f64;
+
+                // Find album
+                let album = match lookup::find_album_with_fallback(
+                    &backends, &pooled, avg_duration, verbose,
+                ) {
+                    Ok(Some(a)) => a,
+                    Ok(None) => {
+                        println!("  No album found\n");
+                        break;
+                    }
+                    Err(e) => {
+                        println!("  Error: {}\n", e);
+                        break;
+                    }
+                };
+
+                println!();
+                println!("  Found: {} - {} ({} side(s)) [{}]",
+                         album.artist, album.album_title,
+                         album.sides.len(), album.backend);
+                for side in &album.sides {
+                    let dur = if side.total_duration > 0.0 {
+                        format!("{:.0}s", side.total_duration)
+                    } else {
+                        "no durations".to_string()
+                    };
+                    println!("    Side {}: {} tracks ({})",
+                             side.label, side.tracks.len(), dur);
+                }
+
+                // Build FileForAssignment for remaining files only
+                let file_inputs: Vec<FileForAssignment> = remaining.iter()
+                    .map(|&i| FileForAssignment {
+                        path: pre_identified[i].path.clone(),
+                        song_titles: pre_identified[i].songs.iter()
+                            .map(|s| s.title.clone()).collect(),
+                        duration: pre_identified[i].duration,
+                    })
+                    .collect();
+
+                let results = lookup::assign_files_to_album_sides(
+                    &file_inputs, &album, verbose,
+                );
+
+                // Collect well-matched files
+                let mut matched_ri: Vec<usize> = Vec::new();
+                for (ri, r) in results.iter().enumerate() {
+                    if r.side_label != '?' && r.score >= MIN_MATCH_SCORE {
+                        matched_ri.push(ri);
+                    }
+                }
+
+                if matched_ri.is_empty() {
+                    println!("  No files matched above threshold ({:.0})\n",
+                             MIN_MATCH_SCORE);
+                    break;
+                }
+
+                println!();
+                for &ri in &matched_ri {
+                    let r = &results[ri];
+                    let name = Path::new(&r.path)
+                        .file_name().and_then(|n| n.to_str()).unwrap_or(&r.path);
+                    println!("  {} → Side {} (score {:.1})",
+                             name, r.side_label, r.score);
+                    album_overrides.insert(r.path.clone(), r.clone());
+                }
+                println!();
+
+                // Remove matched from remaining
+                let matched_set: std::collections::HashSet<usize> =
+                    matched_ri.into_iter().collect();
+                remaining = remaining.into_iter()
+                    .enumerate()
+                    .filter(|(ri, _)| !matched_set.contains(ri))
+                    .map(|(_, idx)| idx)
+                    .collect();
+            }
+
+            // Report unmatched in this group
+            for &idx in &remaining {
+                let name = Path::new(&pre_identified[idx].path)
+                    .file_name().and_then(|n| n.to_str())
+                    .unwrap_or(&pre_identified[idx].path);
+                println!("  {}: no album match (per-file fallback)", name);
+            }
+            println!();
+        }
+
+        println!("Multi-file results:");
+        println!("-------------------");
+        for r in album_overrides.values() {
+            let name = Path::new(&r.path)
+                .file_name().and_then(|n| n.to_str()).unwrap_or(&r.path);
+            let dur_info = if !r.tracks.is_empty() {
+                let dur: f64 = r.tracks.iter().map(|t| t.length_seconds).sum();
+                format!("{} tracks, {:.0}s", r.tracks.len(), dur)
+            } else {
+                "no tracks".to_string()
+            };
+            println!("  {} → Side {} ({}) [{}]",
+                     name, r.side_label, dur_info, r.backend);
+        }
+        println!();
+        println!("{}", "=".repeat(60));
+    }
+
     for wav_file in &files_to_process {
         if files_to_process.len() > 1 {
             println!();
             println!("{}", "=".repeat(60));
         }
-        
+
+        let override_result = album_overrides.get(*wav_file);
+
         process_file(wav_file, verbose, dump, min_prominence, min_song_duration,
                      smooth_window_secs, chunk_ms, no_shazam, no_musicbrainz, no_discogs,
-                     no_cue, rename, identify_only);
+                     no_cue, rename, identify_only, override_result);
     }
 }
 
@@ -781,6 +1053,7 @@ fn process_file(
     no_cue: bool,
     rename: bool,
     identify_only: bool,
+    album_override: Option<&FileSideResult>,
 ) {
     if !Path::new(wav_file).exists() {
         eprintln!("Error: File not found: {}", wav_file);
@@ -975,7 +1248,45 @@ fn process_file(
     }
 
     // ==== Step 2: Album / side lookup (Discogs → MusicBrainz) ====
-    if (!no_discogs || !no_musicbrainz) && !identified_songs.is_empty() {
+    if let Some(ovr) = album_override {
+        // Use pre-computed multi-file album identification result
+        println!("Album / Side Lookup (from multi-file identification):");
+        println!("----------------------------------------------------");
+
+        artist = ovr.artist.clone();
+        album_title = ovr.album_title.clone();
+
+        println!("Release: {} (via {})", ovr.release_info, ovr.backend);
+        println!("Assigned side: {}", ovr.side_label);
+        mb_info = Some(format!("{} - {} [{}]", artist, album_title, ovr.release_info));
+
+        if !ovr.tracks.is_empty() {
+            let expected_duration: f64 = ovr.tracks.iter()
+                .map(|t| t.length_seconds).sum();
+            let duration_error = (expected_duration - music_duration).abs();
+            let error_percent = (duration_error / music_duration) * 100.0;
+
+            if error_percent <= 3.0 && ovr.tracks.len() >= 2 {
+                use_guided_detection = true;
+                mb_tracks = Some(ovr.tracks.clone());
+                println!("Duration match: {:.1}% error - using guided detection", error_percent);
+            } else {
+                println!("Duration match: {:.1}% error - using autonomous detection", error_percent);
+            }
+
+            track_names = ovr.tracks.iter()
+                .map(|t| format!("#{} {}", t.position, t.title))
+                .collect();
+
+            println!("Tracks for this side: {}", ovr.tracks.len());
+            for t in &ovr.tracks {
+                println!("  #{} {} ({:.0}s)", t.position, t.title, t.length_seconds);
+            }
+        } else {
+            println!("No track data for assigned side");
+        }
+        println!();
+    } else if (!no_discogs || !no_musicbrainz) && !identified_songs.is_empty() {
         println!("Album / Side Lookup:");
         println!("--------------------");
 
@@ -984,7 +1295,7 @@ fn process_file(
         let mb_vinyl = MusicBrainzBackend { vinyl_only: true };
         let mb_all   = MusicBrainzBackend { vinyl_only: false };
 
-        let mut backends: Vec<&dyn AlbumSideIdentifier> = Vec::new();
+        let mut backends: Vec<&dyn AlbumIdentifier> = Vec::new();
         if !no_discogs    { backends.push(&discogs_backend); }
         if !no_musicbrainz { backends.push(&mb_vinyl); }
         if !no_musicbrainz { backends.push(&mb_all); }

@@ -1,11 +1,11 @@
 //! Album/side identification with pluggable backends and fallback strategy.
 //!
-//! The [`AlbumSideIdentifier`] trait defines a common interface for looking up
-//! which album and side a set of identified songs belong to.  Two backends are
-//! provided:
+//! The [`AlbumIdentifier`] trait defines a common interface for looking up
+//! which album and side a set of identified songs belong to.  Implementations
+//! live in separate modules:
 //!
-//! * [`DiscogsBackend`] – uses the Discogs API (explicit side letters A/B/C/D)
-//! * [`MusicBrainzBackend`] – uses the MusicBrainz API (with optional vinyl filter)
+//! * [`lookup_discogs::DiscogsBackend`]
+//! * [`lookup_musicbrainz::MusicBrainzBackend`]
 //!
 //! [`find_album_side_with_fallback`] tries each backend in order and returns the
 //! first successful result.
@@ -14,6 +14,10 @@ use std::error::Error;
 
 use crate::album_identifier::IdentifiedSong;
 use crate::musicbrainz;
+
+// Re-export backends so existing `use autorec::lookup::{DiscogsBackend, …}` keeps working.
+pub use crate::lookup_discogs::DiscogsBackend;
+pub use crate::lookup_musicbrainz::MusicBrainzBackend;
 
 // ── Common result type ───────────────────────────────────────────────────────
 
@@ -40,10 +44,45 @@ impl AlbumSideResult {
     }
 }
 
+/// One side of a vinyl release (e.g. Side A, Side B, …).
+#[derive(Debug, Clone)]
+pub struct SideInfo {
+    /// Side letter: 'A', 'B', 'C', 'D', …
+    pub label: char,
+    /// Ordered track list for this side
+    pub tracks: Vec<musicbrainz::ExpectedTrack>,
+    /// Total duration of this side in seconds (0 when unknown)
+    pub total_duration: f64,
+}
+
+/// Full album result with all sides — returned by [`AlbumIdentifier::find_album`].
+#[derive(Debug, Clone)]
+pub struct AlbumResult {
+    /// Artist name
+    pub artist: String,
+    /// Album / release title
+    pub album_title: String,
+    /// Human-readable release reference (URL or ID string)
+    pub release_info: String,
+    /// All sides of the release, in order
+    pub sides: Vec<SideInfo>,
+    /// Name of the backend that produced this result
+    pub backend: String,
+}
+
+impl AlbumResult {
+    /// Check whether at least one side carries usable (non-zero) duration data.
+    pub fn has_usable_durations(&self) -> bool {
+        self.sides.iter().any(|s|
+            s.tracks.iter().any(|t| t.length_seconds > 0.0)
+        )
+    }
+}
+
 // ── Trait ─────────────────────────────────────────────────────────────────────
 
 /// A backend that can identify which album and side a set of songs belong to.
-pub trait AlbumSideIdentifier {
+pub trait AlbumIdentifier {
     /// Short display name, e.g. "Discogs" or "MusicBrainz (vinyl)".
     fn name(&self) -> &str;
 
@@ -55,6 +94,38 @@ pub trait AlbumSideIdentifier {
         file_duration_seconds: f64,
         verbose: bool,
     ) -> Result<Option<AlbumSideResult>, Box<dyn Error>>;
+
+    /// Try to find the album matching the given songs, returning **all** sides.
+    /// This is used by multi-file identification where we need to assign
+    /// different files to different sides of the same album.
+    ///
+    /// The default implementation calls `find_album_side()` and returns a
+    /// single-side album.  Backends that have full per-side data should
+    /// override this for proper multi-side results.
+    fn find_album(
+        &self,
+        songs: &[IdentifiedSong],
+        file_duration_seconds: f64,
+        verbose: bool,
+    ) -> Result<Option<AlbumResult>, Box<dyn Error>> {
+        // Default: fall back to find_album_side and wrap in an AlbumResult
+        let side = match self.find_album_side(songs, file_duration_seconds, verbose)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let total_dur: f64 = side.tracks.iter().map(|t| t.length_seconds).sum();
+        Ok(Some(AlbumResult {
+            artist: side.artist,
+            album_title: side.album_title,
+            release_info: side.release_info,
+            sides: vec![SideInfo {
+                label: '?',
+                tracks: side.tracks,
+                total_duration: total_dur,
+            }],
+            backend: side.backend,
+        }))
+    }
 
     /// Given an album already identified by another backend, try to fetch
     /// tracks with duration data for the matching side.
@@ -74,207 +145,15 @@ pub trait AlbumSideIdentifier {
     }
 }
 
-// ── Discogs backend ──────────────────────────────────────────────────────────
-
-/// Looks up the album via the Discogs API.
-/// Discogs track positions carry explicit side letters (A1, B2, C3, …).
-pub struct DiscogsBackend;
-
-impl AlbumSideIdentifier for DiscogsBackend {
-    fn name(&self) -> &str {
-        "Discogs"
-    }
-
-    fn find_album_side(
-        &self,
-        songs: &[IdentifiedSong],
-        file_duration_seconds: f64,
-        verbose: bool,
-    ) -> Result<Option<AlbumSideResult>, Box<dyn Error>> {
-        use crate::discogs;
-
-        let release = match discogs::find_album_by_songs(
-            songs,
-            file_duration_seconds,
-            true, // vinyl_only
-            verbose,
-        )? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        let song_titles: Vec<String> = songs.iter().map(|s| s.title.clone()).collect();
-
-        let side = match discogs::find_best_side(
-            &release,
-            file_duration_seconds,
-            &song_titles,
-            verbose,
-        ) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        let tracks = discogs::side_to_expected_tracks(side);
-        if tracks.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(AlbumSideResult {
-            artist: release.artist,
-            album_title: release.title,
-            release_info: format!(
-                "https://www.discogs.com/release/{}",
-                release.release_id
-            ),
-            tracks,
-            backend: "Discogs".to_string(),
-        }))
-    }
-}
-
-// ── MusicBrainz backend ──────────────────────────────────────────────────────
-
-/// Looks up the album via the MusicBrainz API.
-/// When `vinyl_only` is true only vinyl releases are considered.
-pub struct MusicBrainzBackend {
-    pub vinyl_only: bool,
-}
-
-impl AlbumSideIdentifier for MusicBrainzBackend {
-    fn name(&self) -> &str {
-        if self.vinyl_only {
-            "MusicBrainz (vinyl)"
-        } else {
-            "MusicBrainz (all)"
-        }
-    }
-
-    fn find_album_side(
-        &self,
-        songs: &[IdentifiedSong],
-        file_duration_seconds: f64,
-        verbose: bool,
-    ) -> Result<Option<AlbumSideResult>, Box<dyn Error>> {
-        let (best, _song_count) = match musicbrainz::find_album_by_songs(
-            songs,
-            file_duration_seconds,
-            self.vinyl_only,
-            verbose,
-        )? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        let sides = musicbrainz::fetch_release_sides(&best.release_id)?;
-
-        let song_titles: Vec<String> = songs.iter().map(|s| s.title.clone()).collect();
-
-        let side_tracks =
-            if let Some(tracks) = musicbrainz::find_best_side(&sides, file_duration_seconds, &song_titles) {
-                tracks
-            } else {
-                // Fallback: flatten all tracks and split by duration
-                let all_tracks: Vec<musicbrainz::ExpectedTrack> =
-                    sides.iter().flat_map(|s| s.tracks.clone()).collect();
-                let (_, t) =
-                    musicbrainz::match_tracks_to_duration(&all_tracks, file_duration_seconds);
-                t
-            };
-
-        if side_tracks.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(AlbumSideResult {
-            artist: best.artist,
-            album_title: best.title,
-            release_info: format!(
-                "https://musicbrainz.org/release/{}",
-                best.release_id
-            ),
-            tracks: side_tracks,
-            backend: self.name().to_string(),
-        }))
-    }
-
-    fn fetch_durations_for_album(
-        &self,
-        artist: &str,
-        album_title: &str,
-        track_titles: &[String],
-        file_duration_seconds: f64,
-        verbose: bool,
-    ) -> Result<Option<Vec<musicbrainz::ExpectedTrack>>, Box<dyn Error>> {
-        self.search_album_for_durations(artist, album_title, track_titles, file_duration_seconds, verbose)
-    }
-}
-
-impl MusicBrainzBackend {
-    /// Search MusicBrainz for a release by artist+album, return the best
-    /// matching side's tracks (with duration data).
-    fn search_album_for_durations(
-        &self,
-        artist: &str,
-        album_title: &str,
-        track_titles: &[String],
-        file_duration_seconds: f64,
-        verbose: bool,
-    ) -> Result<Option<Vec<musicbrainz::ExpectedTrack>>, Box<dyn Error>> {
-        use crate::rate_limiter::RateLimiter;
-
-        let mut rl = RateLimiter::from_millis("MusicBrainz", 1100);
-
-        let results = musicbrainz::search_release(artist, album_title, 10)?;
-        rl.wait_if_needed();
-
-        if results.is_empty() {
-            if verbose {
-                println!("  [{}] No releases found for duration enrichment", self.name());
-            }
-            return Ok(None);
-        }
-
-        // Optionally filter to vinyl
-        let candidates: Vec<_> = if self.vinyl_only {
-            let vinyl: Vec<_> = results.iter().filter(|r| r.is_vinyl).cloned().collect();
-            if vinyl.is_empty() { results } else { vinyl }
-        } else {
-            results
-        };
-
-        for result in &candidates {
-            let sides = match musicbrainz::fetch_release_sides(&result.release_id) {
-                Ok(s) => s,
-                Err(_) => { rl.wait_if_needed(); continue; }
-            };
-            rl.wait_if_needed();
-
-            if let Some(tracks) = musicbrainz::find_best_side(&sides, file_duration_seconds, track_titles) {
-                let total_dur: f64 = tracks.iter().map(|t| t.length_seconds).sum();
-                if total_dur > 0.0 {
-                    if verbose {
-                        println!("  [{}] Found durations from release {}",
-                                 self.name(), result.release_id);
-                    }
-                    return Ok(Some(tracks));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-}
-
 // ── Fallback strategy ────────────────────────────────────────────────────────
 
 /// Try each backend in order.  Returns the first successful result.
 ///
 /// When the winning backend returns tracks without duration data (all 0 s),
 /// the remaining backends are asked to enrich the result via
-/// [`AlbumSideIdentifier::fetch_durations_for_album`].
+/// [`AlbumIdentifier::fetch_durations_for_album`].
 pub fn find_album_side_with_fallback(
-    backends: &[&dyn AlbumSideIdentifier],
+    backends: &[&dyn AlbumIdentifier],
     songs: &[IdentifiedSong],
     file_duration_seconds: f64,
     verbose: bool,
@@ -346,4 +225,210 @@ pub fn find_album_side_with_fallback(
     }
 
     Ok(None)
+}
+
+/// Try each backend in order to find the full album (all sides).
+/// Returns the first successful result.
+pub fn find_album_with_fallback(
+    backends: &[&dyn AlbumIdentifier],
+    songs: &[IdentifiedSong],
+    file_duration_seconds: f64,
+    verbose: bool,
+) -> Result<Option<AlbumResult>, Box<dyn Error>> {
+    for backend in backends.iter() {
+        println!("Trying {}...", backend.name());
+
+        match backend.find_album(songs, file_duration_seconds, verbose) {
+            Ok(Some(result)) => {
+                println!(
+                    "{}: found {} - {} ({} side(s))",
+                    result.backend,
+                    result.artist,
+                    result.album_title,
+                    result.sides.len()
+                );
+                return Ok(Some(result));
+            }
+            Ok(None) => {
+                println!("{}: no match found", backend.name());
+            }
+            Err(e) => {
+                println!("{}: error: {}", backend.name(), e);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+// ── Multi-file side assignment ───────────────────────────────────────────────
+
+/// Per-file data needed for side assignment.
+pub struct FileForAssignment {
+    /// File path (for display and result keying)
+    pub path: String,
+    /// Song titles identified by Shazam for this file
+    pub song_titles: Vec<String>,
+    /// Duration of the file/music region in seconds
+    pub duration: f64,
+}
+
+/// Per-file result after album identification and side assignment.
+#[derive(Debug, Clone)]
+pub struct FileSideResult {
+    /// Original file path
+    pub path: String,
+    /// Artist name
+    pub artist: String,
+    /// Album title
+    pub album_title: String,
+    /// Human-readable release reference (URL or ID string)
+    pub release_info: String,
+    /// Side letter assigned ('A', 'B', … or '?' if unmatched)
+    pub side_label: char,
+    /// Ordered track list for the assigned side
+    pub tracks: Vec<musicbrainz::ExpectedTrack>,
+    /// Name of the backend that found the album
+    pub backend: String,
+    /// Assignment score (higher = better match; 0.0 if unmatched)
+    pub score: f64,
+}
+
+/// Score how well a file's songs match an album side.
+///
+/// Uses song-title word overlap (weighted ×100) plus duration match
+/// (weighted ×10).  Higher = better match.
+pub fn score_file_vs_side(song_titles: &[String], side: &SideInfo, file_duration: f64) -> f64 {
+    if side.tracks.is_empty() || song_titles.is_empty() {
+        return 0.0;
+    }
+
+    let track_titles_lower: Vec<String> = side.tracks.iter()
+        .map(|t| t.title.to_lowercase())
+        .collect();
+
+    let mut matches = 0;
+    for song in song_titles {
+        let song_lower = song.to_lowercase();
+        let words: Vec<&str> = song_lower.split_whitespace()
+            .filter(|w| w.len() >= 3)
+            .collect();
+        for tt in &track_titles_lower {
+            let wm = words.iter().filter(|w| tt.contains(**w)).count();
+            if wm >= 1 && (wm as f64 / words.len().max(1) as f64) >= 0.3 {
+                matches += 1;
+                break;
+            }
+        }
+    }
+
+    let song_score = matches as f64 / song_titles.len().max(1) as f64;
+
+    let dur_score = if side.total_duration > 0.0 {
+        let ratio = (side.total_duration - file_duration).abs() / file_duration;
+        (1.0 - ratio * 10.0).max(0.0)
+    } else {
+        0.5
+    };
+
+    song_score * 100.0 + dur_score * 10.0
+}
+
+/// Assign files to album sides using a greedy algorithm.
+///
+/// Returns one [`FileSideResult`] per input file (in the same order).
+/// Files that couldn't be matched get `side_label = '?'` and an empty track list.
+pub fn assign_files_to_album_sides(
+    files: &[FileForAssignment],
+    album: &AlbumResult,
+    verbose: bool,
+) -> Vec<FileSideResult> {
+    let n_files = files.len();
+    let n_sides = album.sides.len();
+
+    // Build score matrix
+    let mut scores = vec![vec![0.0f64; n_sides]; n_files];
+    for (fi, file) in files.iter().enumerate() {
+        for (si, side) in album.sides.iter().enumerate() {
+            scores[fi][si] = score_file_vs_side(&file.song_titles, side, file.duration);
+        }
+    }
+
+    if verbose {
+        println!("Score matrix:");
+        print!("  {:>42}", "");
+        for side in &album.sides {
+            print!("  Side {} ", side.label);
+        }
+        println!();
+        for (fi, file) in files.iter().enumerate() {
+            let name = std::path::Path::new(&file.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file.path);
+            let s = if name.len() > 42 { &name[..42] } else { name };
+            print!("  {:>42}", s);
+            for si in 0..n_sides {
+                print!("  {:>6.1}", scores[fi][si]);
+            }
+            println!();
+        }
+        println!();
+    }
+
+    // Greedy assignment: pick highest score, mark both file and side as used
+    let mut assigned_files = std::collections::HashSet::new();
+    let mut assigned_sides = std::collections::HashSet::new();
+    let mut assignments: Vec<(usize, usize, f64)> = Vec::new();
+
+    let pairs = n_files.min(n_sides);
+    for _ in 0..pairs {
+        let mut best = (0usize, 0usize, f64::NEG_INFINITY);
+        for fi in 0..n_files {
+            if assigned_files.contains(&fi) { continue; }
+            for si in 0..n_sides {
+                if assigned_sides.contains(&si) { continue; }
+                if scores[fi][si] > best.2 {
+                    best = (fi, si, scores[fi][si]);
+                }
+            }
+        }
+        if best.2 <= 0.0 { break; }
+        assigned_files.insert(best.0);
+        assigned_sides.insert(best.1);
+        assignments.push(best);
+    }
+
+    // Build one FileSideResult per input file
+    let mut result_map: std::collections::HashMap<usize, (usize, f64)> = std::collections::HashMap::new();
+    for &(fi, si, sc) in &assignments {
+        result_map.insert(fi, (si, sc));
+    }
+
+    files.iter().enumerate().map(|(fi, file)| {
+        if let Some(&(si, score)) = result_map.get(&fi) {
+            let side = &album.sides[si];
+            FileSideResult {
+                path: file.path.clone(),
+                artist: album.artist.clone(),
+                album_title: album.album_title.clone(),
+                release_info: album.release_info.clone(),
+                side_label: side.label,
+                tracks: side.tracks.clone(),
+                backend: album.backend.clone(),
+                score,
+            }
+        } else {
+            FileSideResult {
+                path: file.path.clone(),
+                artist: album.artist.clone(),
+                album_title: album.album_title.clone(),
+                release_info: album.release_info.clone(),
+                side_label: '?',
+                tracks: Vec::new(),
+                backend: format!("{} (no side matched)", album.backend),
+                score: 0.0,
+            }
+        }
+    }).collect()
 }

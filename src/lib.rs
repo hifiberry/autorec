@@ -1,3 +1,4 @@
+pub mod album_finder;
 pub mod audio_analysis;
 pub mod audio_stream;
 pub mod album_identifier;
@@ -8,6 +9,8 @@ pub mod detection_strategies;
 pub mod discogs;
 pub mod display;
 pub mod lookup;
+pub mod lookup_discogs;
+pub mod lookup_musicbrainz;
 pub mod musicbrainz;
 pub mod pause_detector;
 pub mod rate_limiter;

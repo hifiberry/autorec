@@ -71,3 +71,7 @@ path = "src/bin/discogs_lookup.rs"
 [[bin]]
 name = "discogs_e2e_test"
 path = "src/bin/discogs_e2e_test.rs"
+
+[[bin]]
+name = "identify_album"
+path = "src/bin/identify_album.rs"
